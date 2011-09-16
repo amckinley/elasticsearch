@@ -45,8 +45,11 @@ public class GeoDistanceRangeFilterBuilder extends BaseFilterBuilder {
     private GeoDistance geoDistance;
 
     private Boolean cache;
+    private String cacheKey;
 
     private String filterName;
+
+    private String optimizeBbox;
 
     public GeoDistanceRangeFilterBuilder(String name) {
         this.name = name;
@@ -122,6 +125,11 @@ public class GeoDistanceRangeFilterBuilder extends BaseFilterBuilder {
         return this;
     }
 
+    public GeoDistanceRangeFilterBuilder optimizeBbox(String optimizeBbox) {
+        this.optimizeBbox = optimizeBbox;
+        return this;
+    }
+
     /**
      * Sets the filter name for the filter that can be used when searching for matched_filters per hit.
      */
@@ -135,6 +143,11 @@ public class GeoDistanceRangeFilterBuilder extends BaseFilterBuilder {
      */
     public GeoDistanceRangeFilterBuilder cache(boolean cache) {
         this.cache = cache;
+        return this;
+    }
+
+    public GeoDistanceRangeFilterBuilder cacheKey(String cacheKey) {
+        this.cacheKey = cacheKey;
         return this;
     }
 
@@ -152,11 +165,17 @@ public class GeoDistanceRangeFilterBuilder extends BaseFilterBuilder {
         if (geoDistance != null) {
             builder.field("distance_type", geoDistance.name().toLowerCase());
         }
+        if (optimizeBbox != null) {
+            builder.field("optimize_bbox", optimizeBbox);
+        }
         if (filterName != null) {
             builder.field("_name", filterName);
         }
         if (cache != null) {
             builder.field("_cache", cache);
+        }
+        if (cacheKey != null) {
+            builder.field("_cache_key", cacheKey);
         }
         builder.endObject();
     }

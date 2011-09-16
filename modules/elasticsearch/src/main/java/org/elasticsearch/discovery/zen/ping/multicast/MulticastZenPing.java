@@ -25,16 +25,26 @@ import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
-import org.elasticsearch.common.io.stream.*;
+import org.elasticsearch.common.io.stream.BytesStreamInput;
+import org.elasticsearch.common.io.stream.CachedStreamInput;
+import org.elasticsearch.common.io.stream.CachedStreamOutput;
+import org.elasticsearch.common.io.stream.HandlesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.io.stream.Streamable;
+import org.elasticsearch.common.io.stream.VoidStreamable;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.discovery.DiscoveryException;
 import org.elasticsearch.discovery.zen.DiscoveryNodesProvider;
 import org.elasticsearch.discovery.zen.ping.ZenPing;
 import org.elasticsearch.discovery.zen.ping.ZenPingException;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.transport.*;
+import org.elasticsearch.transport.BaseTransportRequestHandler;
+import org.elasticsearch.transport.TransportChannel;
+import org.elasticsearch.transport.TransportException;
+import org.elasticsearch.transport.TransportService;
+import org.elasticsearch.transport.VoidTransportResponseHandler;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -131,9 +141,14 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
             this.datagramPacketReceive = new DatagramPacket(new byte[bufferSize], bufferSize);
             this.datagramPacketSend = new DatagramPacket(new byte[bufferSize], bufferSize, InetAddress.getByName(group), port);
         } catch (Exception e) {
-            throw new DiscoveryException("Failed to set datagram packets", e);
+            logger.warn("disabled, failed to setup multicast (datagram) discovery : {}", e.getMessage());
+            if (logger.isDebugEnabled()) {
+                logger.debug("disabled, failed to setup multicast (datagram) discovery", e);
+            }
+            return;
         }
 
+        InetAddress multicastInterface = null;
         try {
             MulticastSocket multicastSocket;
 //            if (NetworkUtils.canBindToMcastAddress()) {
@@ -150,7 +165,7 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
             multicastSocket.setTimeToLive(ttl);
 
             // set the send interface
-            InetAddress multicastInterface = networkService.resolvePublishHostAddress(address);
+            multicastInterface = networkService.resolvePublishHostAddress(address);
             multicastSocket.setInterface(multicastInterface);
             multicastSocket.joinGroup(InetAddress.getByName(group));
 
@@ -159,19 +174,35 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
             multicastSocket.setSoTimeout(60000);
 
             this.multicastSocket = multicastSocket;
-        } catch (Exception e) {
-            throw new DiscoveryException("Failed to setup multicast socket", e);
-        }
 
-        this.receiver = new Receiver();
-        this.receiverThread = daemonThreadFactory(settings, "discovery#multicast#received").newThread(receiver);
-        this.receiverThread.start();
+            this.receiver = new Receiver();
+            this.receiverThread = daemonThreadFactory(settings, "discovery#multicast#receiver").newThread(receiver);
+            this.receiverThread.start();
+        } catch (Exception e) {
+            datagramPacketReceive = null;
+            datagramPacketSend = null;
+            if (multicastSocket != null) {
+                multicastSocket.close();
+                multicastSocket = null;
+            }
+            logger.warn("disabled, failed to setup multicast discovery on {}: {}", multicastInterface, e.getMessage());
+            if (logger.isDebugEnabled()) {
+                logger.debug("disabled, failed to setup multicast discovery on {}", e, multicastInterface);
+            }
+        }
     }
 
     @Override protected void doStop() throws ElasticSearchException {
-        receiver.stop();
-        receiverThread.interrupt();
-        multicastSocket.close();
+        if (receiver != null) {
+            receiver.stop();
+        }
+        if (receiverThread != null) {
+            receiverThread.interrupt();
+        }
+        if (multicastSocket != null) {
+            multicastSocket.close();
+            multicastSocket = null;
+        }
     }
 
     @Override protected void doClose() throws ElasticSearchException {
@@ -181,11 +212,11 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
         final AtomicReference<PingResponse[]> response = new AtomicReference<PingResponse[]>();
         final CountDownLatch latch = new CountDownLatch(1);
         ping(new PingListener() {
-                    @Override public void onPing(PingResponse[] pings) {
-                        response.set(pings);
-                        latch.countDown();
-                    }
-                }, timeout);
+            @Override public void onPing(PingResponse[] pings) {
+                response.set(pings);
+                latch.countDown();
+            }
+        }, timeout);
         try {
             latch.await();
             return response.get();
@@ -218,6 +249,9 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
     }
 
     private void sendPingRequest(int id, boolean remove) {
+        if (multicastSocket == null) {
+            return;
+        }
         synchronized (sendMutex) {
             CachedStreamOutput.Entry cachedEntry = CachedStreamOutput.popEntry();
             try {
@@ -243,6 +277,9 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
                 if (remove) {
                     receivedResponses.remove(id);
                 }
+                if (lifecycle.stoppedOrClosed()) {
+                    return;
+                }
                 throw new ZenPingException("Failed to send ping request over multicast on " + multicastSocket, e);
             }
         }
@@ -262,7 +299,7 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
             }
             ConcurrentMap<DiscoveryNode, PingResponse> responses = receivedResponses.get(request.id);
             if (responses == null) {
-                logger.warn("received ping response with no matching id [{}]", request.id);
+                logger.warn("received ping response {} with no matching id [{}]", request.pingResponse, request.id);
             } else {
                 responses.put(request.pingResponse.target(), request.pingResponse);
             }
@@ -337,7 +374,16 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
                         continue;
                     }
                     if (!clusterName.equals(MulticastZenPing.this.clusterName)) {
-                        // not our cluster, ignore it...
+                        if (logger.isTraceEnabled()) {
+                            logger.trace("[{}] received ping_request from [{}], but wrong cluster_name [{}], expected [{}], ignoring", id, requestingNode, clusterName, MulticastZenPing.this.clusterName);
+                        }
+                        continue;
+                    }
+                    // don't connect between two client nodes, no need for that...
+                    if (!discoveryNodes.localNode().shouldConnectTo(requestingNode)) {
+                        if (logger.isTraceEnabled()) {
+                            logger.trace("[{}] received ping_request from [{}], both are client nodes, ignoring", id, requestingNode, clusterName);
+                        }
                         continue;
                     }
                     final MulticastPingResponse multicastPingResponse = new MulticastPingResponse();

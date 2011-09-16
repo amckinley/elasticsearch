@@ -21,6 +21,7 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
 import org.elasticsearch.common.lucene.all.AllEntries;
 import org.elasticsearch.common.util.concurrent.NotThreadSafe;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -54,13 +55,12 @@ public class ParseContext {
 
     private String index;
 
-    private String type;
-
+    private SourceToParse sourceToParse;
     private byte[] source;
+    private int sourceOffset;
+    private int sourceLength;
 
     private String id;
-
-    private boolean flyweight;
 
     private DocumentMapper.ParseListener listener;
 
@@ -69,8 +69,6 @@ public class ParseContext {
     private StringBuilder stringBuilder = new StringBuilder();
 
     private Map<String, String> ignoredValues = new HashMap<String, String>();
-
-    private ParsedIdState parsedIdState;
 
     private boolean mappersAdded = false;
 
@@ -87,7 +85,7 @@ public class ParseContext {
         this.path = path;
     }
 
-    public void reset(XContentParser parser, Document document, String type, byte[] source, boolean flyweight, DocumentMapper.ParseListener listener) {
+    public void reset(XContentParser parser, Document document, SourceToParse source, DocumentMapper.ParseListener listener) {
         this.parser = parser;
         this.document = document;
         if (document != null) {
@@ -99,11 +97,11 @@ public class ParseContext {
         this.analyzer = null;
         this.uid = null;
         this.id = null;
-        this.type = type;
-        this.source = source;
-        this.flyweight = flyweight;
+        this.sourceToParse = source;
+        this.source = source == null ? null : sourceToParse.source();
+        this.sourceOffset = source == null ? 0 : sourceToParse.sourceOffset();
+        this.sourceLength = source == null ? 0 : sourceToParse.sourceLength();
         this.path.reset();
-        this.parsedIdState = ParsedIdState.NO;
         this.mappersAdded = false;
         this.listener = listener == null ? DocumentMapper.ParseListener.EMPTY : listener;
         this.allEntries = new AllEntries();
@@ -111,7 +109,7 @@ public class ParseContext {
     }
 
     public boolean flyweight() {
-        return this.flyweight;
+        return sourceToParse.flyweight();
     }
 
     public DocumentMapperParser docMapperParser() {
@@ -131,16 +129,30 @@ public class ParseContext {
     }
 
     public String type() {
-        return this.type;
+        return sourceToParse.type();
+    }
+
+    public SourceToParse sourceToParse() {
+        return this.sourceToParse;
     }
 
     public byte[] source() {
-        return this.source;
+        return source;
+    }
+
+    public int sourceOffset() {
+        return this.sourceOffset;
+    }
+
+    public int sourceLength() {
+        return this.sourceLength;
     }
 
     // only should be used by SourceFieldMapper to update with a compressed source
-    public void source(byte[] source) {
+    public void source(byte[] source, int offset, int length) {
         this.source = source;
+        this.sourceOffset = offset;
+        this.sourceLength = length;
     }
 
     public ContentPath path() {
@@ -193,14 +205,6 @@ public class ParseContext {
         return id;
     }
 
-    public void parsedId(ParsedIdState parsedIdState) {
-        this.parsedIdState = parsedIdState;
-    }
-
-    public ParsedIdState parsedIdState() {
-        return this.parsedIdState;
-    }
-
     public void ignoredValue(String indexName, String value) {
         ignoredValues.put(indexName, value);
     }
@@ -227,16 +231,24 @@ public class ParseContext {
         this.uid = uid;
     }
 
+    public boolean includeInAll(Boolean includeInAll, FieldMapper mapper) {
+        return includeInAll(includeInAll, mapper.index());
+    }
+
     /**
      * Is all included or not. Will always disable it if {@link org.elasticsearch.index.mapper.internal.AllFieldMapper#enabled()}
      * is <tt>false</tt>. If its enabled, then will return <tt>true</tt> only if the specific flag is <tt>null</tt> or
-     * its actual value (so, if not set, defaults to "true").
+     * its actual value (so, if not set, defaults to "true") and the field is indexed.
      */
-    public boolean includeInAll(Boolean specificIncludeInAll) {
+    private boolean includeInAll(Boolean specificIncludeInAll, Field.Index index) {
         if (!docMapper.allFieldMapper().enabled()) {
             return false;
         }
-        return specificIncludeInAll == null || specificIncludeInAll;
+        // not explicitly set
+        if (specificIncludeInAll == null) {
+            return index != Field.Index.NO;
+        }
+        return specificIncludeInAll;
     }
 
     public AllEntries allEntries() {
@@ -272,11 +284,5 @@ public class ParseContext {
     public StringBuilder stringBuilder() {
         stringBuilder.setLength(0);
         return this.stringBuilder;
-    }
-
-    public static enum ParsedIdState {
-        NO,
-        PARSED,
-        EXTERNAL
     }
 }

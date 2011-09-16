@@ -40,8 +40,9 @@ public class IndexTypeMapperTests {
                 .startObject("_index").field("enabled", true).field("store", "yes").endObject()
                 .endObject().endObject().string();
         DocumentMapper docMapper = MapperTests.newParser().parse(mapping);
-        assertThat(docMapper.indexMapper().enabled(), equalTo(true));
-        assertThat(docMapper.indexMapper().store(), equalTo(Field.Store.YES));
+        IndexFieldMapper indexMapper = docMapper.rootMapper(IndexFieldMapper.class);
+        assertThat(indexMapper.enabled(), equalTo(true));
+        assertThat(indexMapper.store(), equalTo(Field.Store.YES));
         assertThat(docMapper.mappers().indexName("_index").mapper(), instanceOf(IndexFieldMapper.class));
 
         ParsedDocument doc = docMapper.parse("type", "1", XContentFactory.jsonBuilder()
@@ -50,8 +51,8 @@ public class IndexTypeMapperTests {
                 .endObject()
                 .copiedBytes());
 
-        assertThat(doc.masterDoc().get("_index"), equalTo("test"));
-        assertThat(doc.masterDoc().get("field"), equalTo("value"));
+        assertThat(doc.rootDoc().get("_index"), equalTo("test"));
+        assertThat(doc.rootDoc().get("field"), equalTo("value"));
     }
 
     @Test public void explicitDisabledIndexMapperTests() throws Exception {
@@ -59,8 +60,9 @@ public class IndexTypeMapperTests {
                 .startObject("_index").field("enabled", false).field("store", "yes").endObject()
                 .endObject().endObject().string();
         DocumentMapper docMapper = MapperTests.newParser().parse(mapping);
-        assertThat(docMapper.indexMapper().enabled(), equalTo(false));
-        assertThat(docMapper.indexMapper().store(), equalTo(Field.Store.YES));
+        IndexFieldMapper indexMapper = docMapper.rootMapper(IndexFieldMapper.class);
+        assertThat(indexMapper.enabled(), equalTo(false));
+        assertThat(indexMapper.store(), equalTo(Field.Store.YES));
 
         ParsedDocument doc = docMapper.parse("type", "1", XContentFactory.jsonBuilder()
                 .startObject()
@@ -68,16 +70,17 @@ public class IndexTypeMapperTests {
                 .endObject()
                 .copiedBytes());
 
-        assertThat(doc.masterDoc().get("_index"), nullValue());
-        assertThat(doc.masterDoc().get("field"), equalTo("value"));
+        assertThat(doc.rootDoc().get("_index"), nullValue());
+        assertThat(doc.rootDoc().get("field"), equalTo("value"));
     }
 
     @Test public void defaultDisabledIndexMapperTests() throws Exception {
         String mapping = XContentFactory.jsonBuilder().startObject().startObject("type")
                 .endObject().endObject().string();
         DocumentMapper docMapper = MapperTests.newParser().parse(mapping);
-        assertThat(docMapper.indexMapper().enabled(), equalTo(false));
-        assertThat(docMapper.indexMapper().store(), equalTo(Field.Store.NO));
+        IndexFieldMapper indexMapper = docMapper.rootMapper(IndexFieldMapper.class);
+        assertThat(indexMapper.enabled(), equalTo(false));
+        assertThat(indexMapper.store(), equalTo(Field.Store.NO));
 
         ParsedDocument doc = docMapper.parse("type", "1", XContentFactory.jsonBuilder()
                 .startObject()
@@ -85,7 +88,7 @@ public class IndexTypeMapperTests {
                 .endObject()
                 .copiedBytes());
 
-        assertThat(doc.masterDoc().get("_index"), nullValue());
-        assertThat(doc.masterDoc().get("field"), equalTo("value"));
+        assertThat(doc.rootDoc().get("_index"), nullValue());
+        assertThat(doc.rootDoc().get("field"), equalTo("value"));
     }
 }

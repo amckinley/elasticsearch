@@ -164,6 +164,10 @@ public class DoubleFieldMapper extends NumberFieldMapper<Double> {
                 includeLower, includeUpper);
     }
 
+    public Filter rangeFilter(Double lowerTerm, Double upperTerm, boolean includeLower, boolean includeUpper) {
+        return NumericRangeFilter.newDoubleRange(names.indexName(), precisionStep, lowerTerm, upperTerm, includeLower, includeUpper);
+    }
+
     @Override public Filter rangeFilter(FieldDataCache fieldDataCache, String lowerTerm, String upperTerm, boolean includeLower, boolean includeUpper) {
         return NumericRangeFieldDataFilter.newDoubleRange(fieldDataCache, names.indexName(),
                 lowerTerm == null ? null : Double.parseDouble(lowerTerm),
@@ -188,7 +192,7 @@ public class DoubleFieldMapper extends NumberFieldMapper<Double> {
             } else {
                 value = ((Number) externalValue).doubleValue();
             }
-            if (context.includeInAll(includeInAll)) {
+            if (context.includeInAll(includeInAll, this)) {
                 context.allEntries().addText(names.fullName(), Double.toString(value), boost);
             }
         } else {
@@ -198,7 +202,7 @@ public class DoubleFieldMapper extends NumberFieldMapper<Double> {
                     return null;
                 }
                 value = nullValue;
-                if (nullValueAsString != null && (context.includeInAll(includeInAll))) {
+                if (nullValueAsString != null && (context.includeInAll(includeInAll, this))) {
                     context.allEntries().addText(names.fullName(), nullValueAsString, boost);
                 }
             } else if (parser.currentToken() == XContentParser.Token.START_OBJECT) {
@@ -225,7 +229,7 @@ public class DoubleFieldMapper extends NumberFieldMapper<Double> {
                 value = objValue;
             } else {
                 value = parser.doubleValue();
-                if (context.includeInAll(includeInAll)) {
+                if (context.includeInAll(includeInAll, this)) {
                     context.allEntries().addText(names.fullName(), parser.text(), boost);
                 }
             }

@@ -21,6 +21,7 @@ package org.apache.lucene.queryParser;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.search.FuzzyQuery;
+import org.apache.lucene.search.MultiTermQuery;
 
 /**
  * @author kimchy (shay.banon)
@@ -41,6 +42,7 @@ public class QueryParserSettings {
     private boolean analyzeWildcard = false;
     private boolean escape = false;
     private Analyzer analyzer = null;
+    private MultiTermQuery.RewriteMethod rewriteMethod = MultiTermQuery.CONSTANT_SCORE_AUTO_REWRITE_DEFAULT;
 
     public String queryString() {
         return queryString;
@@ -154,6 +156,14 @@ public class QueryParserSettings {
         this.analyzeWildcard = analyzeWildcard;
     }
 
+    public MultiTermQuery.RewriteMethod rewriteMethod() {
+        return this.rewriteMethod;
+    }
+
+    public void rewriteMethod(MultiTermQuery.RewriteMethod rewriteMethod) {
+        this.rewriteMethod = rewriteMethod;
+    }
+
     @Override public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
@@ -174,6 +184,8 @@ public class QueryParserSettings {
         if (defaultField != null ? !defaultField.equals(that.defaultField) : that.defaultField != null) return false;
         if (defaultOperator != that.defaultOperator) return false;
         if (queryString != null ? !queryString.equals(that.queryString) : that.queryString != null) return false;
+        if (rewriteMethod != null ? !rewriteMethod.equals(that.rewriteMethod) : that.rewriteMethod != null)
+            return false;
 
         return true;
     }

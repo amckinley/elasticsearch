@@ -53,8 +53,9 @@ public class SimpleAttachmentMapperTests {
 
         byte[] json = jsonBuilder().startObject().field("_id", 1).field("file", html).endObject().copiedBytes();
 
-        Document doc = docMapper.parse(json).masterDoc();
+        Document doc = docMapper.parse(json).rootDoc();
 
+        assertThat(doc.get(docMapper.mappers().smartName("file.content_type").mapper().names().indexName()), equalTo("application/xhtml+xml"));
         assertThat(doc.get(docMapper.mappers().smartName("file.title").mapper().names().indexName()), equalTo("XHTML test document"));
         assertThat(doc.get(docMapper.mappers().smartName("file").mapper().names().indexName()), containsString("This document tests the ability of Apache Tika to extract content"));
 
@@ -64,8 +65,9 @@ public class SimpleAttachmentMapperTests {
 
         json = jsonBuilder().startObject().field("_id", 1).field("file", html).endObject().copiedBytes();
 
-        doc = docMapper.parse(json).masterDoc();
+        doc = docMapper.parse(json).rootDoc();
 
+        assertThat(doc.get(docMapper.mappers().smartName("file.content_type").mapper().names().indexName()), equalTo("application/xhtml+xml"));
         assertThat(doc.get(docMapper.mappers().smartName("file.title").mapper().names().indexName()), equalTo("XHTML test document"));
         assertThat(doc.get(docMapper.mappers().smartName("file").mapper().names().indexName()), containsString("This document tests the ability of Apache Tika to extract content"));
     }

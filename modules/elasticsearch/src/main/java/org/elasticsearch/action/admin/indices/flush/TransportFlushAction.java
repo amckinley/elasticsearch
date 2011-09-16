@@ -111,7 +111,7 @@ public class TransportFlushAction extends TransportBroadcastOperationAction<Flus
 
     @Override protected ShardFlushResponse shardOperation(ShardFlushRequest request) throws ElasticSearchException {
         IndexShard indexShard = indicesService.indexServiceSafe(request.index()).shardSafe(request.shardId());
-        indexShard.flush(new Engine.Flush().refresh(request.refresh()).full(request.full()));
+        indexShard.flush(new Engine.Flush().refresh(request.refresh()).full(request.full()).force(request.force()));
         return new ShardFlushResponse(request.index(), request.shardId());
     }
 
@@ -119,6 +119,6 @@ public class TransportFlushAction extends TransportBroadcastOperationAction<Flus
      * The refresh request works against *all* shards.
      */
     @Override protected GroupShardsIterator shards(FlushRequest request, String[] concreteIndices, ClusterState clusterState) {
-        return clusterState.routingTable().allShardsGrouped(concreteIndices);
+        return clusterState.routingTable().allActiveShardsGrouped(concreteIndices, true);
     }
 }

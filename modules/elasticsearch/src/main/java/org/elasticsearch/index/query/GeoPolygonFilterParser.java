@@ -23,12 +23,15 @@ import org.apache.lucene.search.Filter;
 import org.elasticsearch.common.collect.Lists;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.index.cache.filter.support.CacheKeyFilter;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.geo.GeoPointFieldDataType;
 import org.elasticsearch.index.mapper.geo.GeoPointFieldMapper;
 import org.elasticsearch.index.search.geo.GeoHashUtils;
 import org.elasticsearch.index.search.geo.GeoPolygonFilter;
+import org.elasticsearch.index.search.geo.GeoUtils;
+import org.elasticsearch.index.search.geo.Point;
 
 import java.io.IOException;
 import java.util.List;
@@ -64,9 +67,12 @@ public class GeoPolygonFilterParser implements FilterParser {
         XContentParser parser = parseContext.parser();
 
         boolean cache = false;
+        CacheKeyFilter.Key cacheKey = null;
         String fieldName = null;
-        List<GeoPolygonFilter.Point> points = Lists.newArrayList();
+        List<Point> points = Lists.newArrayList();
 
+        boolean normalizeLon = true;
+        boolean normalizeLat = true;
 
         String filterName = null;
         String currentFieldName = null;
@@ -87,7 +93,7 @@ public class GeoPolygonFilterParser implements FilterParser {
                                 if (token == XContentParser.Token.FIELD_NAME) {
                                     currentFieldName = parser.currentName();
                                 } else if (token == XContentParser.Token.START_ARRAY) {
-                                    GeoPolygonFilter.Point point = new GeoPolygonFilter.Point();
+                                    Point point = new Point();
                                     token = parser.nextToken();
                                     point.lon = parser.doubleValue();
                                     token = parser.nextToken();
@@ -97,7 +103,7 @@ public class GeoPolygonFilterParser implements FilterParser {
                                     }
                                     points.add(point);
                                 } else if (token == XContentParser.Token.START_OBJECT) {
-                                    GeoPolygonFilter.Point point = new GeoPolygonFilter.Point();
+                                    Point point = new Point();
                                     while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
                                         if (token == XContentParser.Token.FIELD_NAME) {
                                             currentFieldName = parser.currentName();
@@ -115,7 +121,7 @@ public class GeoPolygonFilterParser implements FilterParser {
                                     }
                                     points.add(point);
                                 } else if (token.isValue()) {
-                                    GeoPolygonFilter.Point point = new GeoPolygonFilter.Point();
+                                    Point point = new Point();
                                     String value = parser.text();
                                     int comma = value.indexOf(',');
                                     if (comma != -1) {
@@ -137,12 +143,26 @@ public class GeoPolygonFilterParser implements FilterParser {
                     filterName = parser.text();
                 } else if ("_cache".equals(currentFieldName)) {
                     cache = parser.booleanValue();
+                } else if ("_cache_key".equals(currentFieldName) || "_cacheKey".equals(currentFieldName)) {
+                    cacheKey = new CacheKeyFilter.Key(parser.text());
+                } else if ("normalize".equals(currentFieldName)) {
+                    normalizeLat = parser.booleanValue();
+                    normalizeLon = parser.booleanValue();
                 }
             }
         }
 
         if (points.isEmpty()) {
             throw new QueryParsingException(parseContext.index(), "no points defined for geo_polygon filter");
+        }
+
+        for (Point point : points) {
+            if (normalizeLat) {
+                point.lat = GeoUtils.normalizeLat(point.lat);
+            }
+            if (normalizeLon) {
+                point.lon = GeoUtils.normalizeLon(point.lon);
+            }
         }
 
         MapperService mapperService = parseContext.mapperService();
@@ -155,9 +175,9 @@ public class GeoPolygonFilterParser implements FilterParser {
         }
         fieldName = mapper.names().indexName();
 
-        Filter filter = new GeoPolygonFilter(points.toArray(new GeoPolygonFilter.Point[points.size()]), fieldName, parseContext.indexCache().fieldData());
+        Filter filter = new GeoPolygonFilter(points.toArray(new Point[points.size()]), fieldName, parseContext.indexCache().fieldData());
         if (cache) {
-            filter = parseContext.cacheFilter(filter);
+            filter = parseContext.cacheFilter(filter, cacheKey);
         }
         filter = wrapSmartNameFilter(filter, parseContext.smartFieldMappers(fieldName), parseContext);
         if (filterName != null) {

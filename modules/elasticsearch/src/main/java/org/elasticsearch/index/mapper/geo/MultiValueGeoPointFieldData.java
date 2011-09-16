@@ -36,7 +36,7 @@ public class MultiValueGeoPointFieldData extends GeoPointFieldData {
             GeoPoint[][] value = new GeoPoint[VALUE_CACHE_SIZE][];
             for (int i = 0; i < value.length; i++) {
                 value[i] = new GeoPoint[i];
-                for (int j = 0; j < value.length; j++) {
+                for (int j = 0; j < value[i].length; j++) {
                     value[i][j] = new GeoPoint();
                 }
             }
@@ -123,7 +123,7 @@ public class MultiValueGeoPointFieldData extends GeoPointFieldData {
             int loc = ordinal[docId];
             if (loc != 0) {
                 found = true;
-                proc.onOrdinal(docId, ordinal[docId]);
+                proc.onOrdinal(docId, loc);
             }
         }
         if (!found) {

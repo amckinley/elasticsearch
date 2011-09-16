@@ -41,6 +41,7 @@ public class RangeFilterBuilder extends BaseFilterBuilder {
     private boolean includeUpper = true;
 
     private Boolean cache;
+    private String cacheKey;
 
     private String filterName;
 
@@ -271,15 +272,6 @@ public class RangeFilterBuilder extends BaseFilterBuilder {
     /**
      * The to part of the filter query. Null indicates unbounded.
      */
-    public RangeFilterBuilder lte(String to) {
-        this.to = to;
-        this.includeUpper = true;
-        return this;
-    }
-
-    /**
-     * The to part of the filter query. Null indicates unbounded.
-     */
     public RangeFilterBuilder lte(int to) {
         this.to = to;
         this.includeUpper = true;
@@ -354,6 +346,11 @@ public class RangeFilterBuilder extends BaseFilterBuilder {
         return this;
     }
 
+    public RangeFilterBuilder cacheKey(String cacheKey) {
+        this.cacheKey = cacheKey;
+        return this;
+    }
+
     @Override protected void doXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject(RangeFilterParser.NAME);
 
@@ -369,6 +366,9 @@ public class RangeFilterBuilder extends BaseFilterBuilder {
         }
         if (cache != null) {
             builder.field("_cache", cache);
+        }
+        if (cacheKey != null) {
+            builder.field("_cache_key", cacheKey);
         }
 
         builder.endObject();

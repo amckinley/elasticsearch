@@ -27,7 +27,6 @@ import org.apache.lucene.document.Fieldable;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.highlight.*;
-import org.apache.lucene.search.highlight.Formatter;
 import org.apache.lucene.search.vectorhighlight.*;
 import org.elasticsearch.ElasticSearchException;
 import org.elasticsearch.common.collect.ImmutableMap;
@@ -35,6 +34,7 @@ import org.elasticsearch.common.io.FastStringReader;
 import org.elasticsearch.common.lucene.document.SingleFieldSelector;
 import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.FieldMapper;
+import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.search.SearchParseElement;
 import org.elasticsearch.search.fetch.FetchPhaseExecutionException;
 import org.elasticsearch.search.fetch.SearchHitPhase;
@@ -44,7 +44,11 @@ import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.lookup.SearchLookup;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 
 import static org.elasticsearch.common.collect.Maps.*;
 
@@ -53,7 +57,10 @@ import static org.elasticsearch.common.collect.Maps.*;
  */
 public class HighlightPhase implements SearchHitPhase {
 
-    private static final Encoder DEFAULT_ENCODER = new DefaultEncoder();
+    public static class Encoders {
+        public static Encoder DEFAULT = new DefaultEncoder();
+        public static Encoder HTML = new SimpleHTMLEncoder();
+    }
 
     @Override public Map<String, ? extends SearchParseElement> parseElements() {
         return ImmutableMap.of("highlight", new HighlighterParseElement());
@@ -69,10 +76,26 @@ public class HighlightPhase implements SearchHitPhase {
 
             Map<String, HighlightField> highlightFields = newHashMap();
             for (SearchContextHighlight.Field field : context.highlight().fields()) {
+                Encoder encoder;
+                if (field.encoder().equals("html")) {
+                    encoder = Encoders.HTML;
+                } else {
+                    encoder = Encoders.DEFAULT;
+                }
                 FieldMapper mapper = documentMapper.mappers().smartNameFieldMapper(field.field());
                 if (mapper == null) {
-                    //Save skipping missing fields
-                    continue;
+                    MapperService.SmartNameFieldMappers fullMapper = context.mapperService().smartName(field.field());
+                    if (fullMapper == null || !fullMapper.hasDocMapper()) {
+                        //Save skipping missing fields
+                        continue;
+                    }
+                    if (!fullMapper.docMapper().type().equals(hitContext.hit().type())) {
+                        continue;
+                    }
+                    mapper = fullMapper.mapper();
+                    if (mapper == null) {
+                        continue;
+                    }
                 }
 
                 // if we can do highlighting using Term Vectors, use FastVectorHighlighter, otherwise, use the
@@ -96,7 +119,9 @@ public class HighlightPhase implements SearchHitPhase {
                         fragmenter = new SimpleSpanFragmenter(queryScorer, field.fragmentCharSize());
                     }
                     Formatter formatter = new SimpleHTMLFormatter(field.preTags()[0], field.postTags()[0]);
-                    Highlighter highlighter = new Highlighter(formatter, DEFAULT_ENCODER, queryScorer);
+
+
+                    Highlighter highlighter = new Highlighter(formatter, encoder, queryScorer);
                     highlighter.setTextFragmenter(fragmenter);
 
                     List<Object> textsToHighlight;
@@ -149,7 +174,7 @@ public class HighlightPhase implements SearchHitPhase {
                     if (field.numberOfFragments() == 0 && textsToHighlight.size() > 1) {
                         fragments = new String[1];
                         for (int i = 0; i < fragsList.size(); i++) {
-                            fragments[0] = (fragments[0] != null ? (fragments[0]+" ") : "") + fragsList.get(i).toString();
+                            fragments[0] = (fragments[0] != null ? (fragments[0] + " ") : "") + fragsList.get(i).toString();
                         }
                     } else {
                         // refine numberOfFragments if needed
@@ -165,14 +190,45 @@ public class HighlightPhase implements SearchHitPhase {
                         highlightFields.put(highlightField.name(), highlightField);
                     }
                 } else {
-                    FastVectorHighlighter highlighter = buildHighlighter(context, mapper, field);
+                    FragListBuilder fragListBuilder;
+                    FragmentsBuilder fragmentsBuilder;
+                    if (field.numberOfFragments() == 0) {
+                        fragListBuilder = new SingleFragListBuilder();
+
+                        if (mapper.stored()) {
+                            fragmentsBuilder = new SimpleFragmentsBuilder(field.preTags(), field.postTags());
+                        } else {
+                            fragmentsBuilder = new SourceSimpleFragmentsBuilder(mapper, context, field.preTags(), field.postTags());
+                        }
+                    } else {
+                        if (field.fragmentOffset() == -1)
+                            fragListBuilder = new SimpleFragListBuilder();
+                        else
+                            fragListBuilder = new MarginFragListBuilder(field.fragmentOffset());
+
+                        if (field.scoreOrdered()) {
+                            if (mapper.stored()) {
+                                fragmentsBuilder = new ScoreOrderFragmentsBuilder(field.preTags(), field.postTags());
+                            } else {
+                                fragmentsBuilder = new SourceScoreOrderFragmentsBuilder(mapper, context, field.preTags(), field.postTags());
+                            }
+                        } else {
+                            if (mapper.stored()) {
+                                fragmentsBuilder = new SimpleFragmentsBuilder(field.preTags(), field.postTags());
+                            } else {
+                                fragmentsBuilder = new SourceSimpleFragmentsBuilder(mapper, context, field.preTags(), field.postTags());
+                            }
+                        }
+                    }
+                    FastVectorHighlighter highlighter = new FastVectorHighlighter(true, false, fragListBuilder, fragmentsBuilder);
                     FieldQuery fieldQuery = buildFieldQuery(highlighter, context.query(), hitContext.reader(), field);
 
                     String[] fragments;
                     try {
                         // a HACK to make highlighter do highlighting, even though its using the single frag list builder
                         int numberOfFragments = field.numberOfFragments() == 0 ? 1 : field.numberOfFragments();
-                        fragments = highlighter.getBestFragments(fieldQuery, hitContext.reader(), hitContext.docId(), mapper.names().indexName(), field.fragmentCharSize(), numberOfFragments);
+                        fragments = highlighter.getBestFragments(fieldQuery, hitContext.reader(), hitContext.docId(), mapper.names().indexName(), field.fragmentCharSize(), numberOfFragments,
+                                fragListBuilder, fragmentsBuilder, field.preTags(), field.postTags(), encoder);
                     } catch (IOException e) {
                         throw new FetchPhaseExecutionException(context, "Failed to highlight field [" + field.field() + "]", e);
                     }
@@ -194,35 +250,5 @@ public class HighlightPhase implements SearchHitPhase {
         CustomFieldQuery.reader.set(indexReader);
         CustomFieldQuery.highlightFilters.set(field.highlightFilter());
         return new CustomFieldQuery(query, highlighter);
-    }
-
-    private FastVectorHighlighter buildHighlighter(SearchContext searchContext, FieldMapper fieldMapper, SearchContextHighlight.Field field) {
-        FragListBuilder fragListBuilder;
-        FragmentsBuilder fragmentsBuilder;
-        if (field.numberOfFragments() == 0) {
-            fragListBuilder = new SingleFragListBuilder();
-            if (fieldMapper.stored()) {
-                fragmentsBuilder = new SimpleFragmentsBuilder(field.preTags(), field.postTags());
-            } else {
-                fragmentsBuilder = new SourceSimpleFragmentsBuilder(fieldMapper, searchContext, field.preTags(), field.postTags());
-            }
-        } else {
-            fragListBuilder = new SimpleFragListBuilder();
-            if (field.scoreOrdered()) {
-                if (fieldMapper.stored()) {
-                    fragmentsBuilder = new ScoreOrderFragmentsBuilder(field.preTags(), field.postTags());
-                } else {
-                    fragmentsBuilder = new SourceScoreOrderFragmentsBuilder(fieldMapper, searchContext, field.preTags(), field.postTags());
-                }
-            } else {
-                if (fieldMapper.stored()) {
-                    fragmentsBuilder = new SimpleFragmentsBuilder(field.preTags(), field.postTags());
-                } else {
-                    fragmentsBuilder = new SourceSimpleFragmentsBuilder(fieldMapper, searchContext, field.preTags(), field.postTags());
-                }
-            }
-        }
-
-        return new FastVectorHighlighter(true, false, fragListBuilder, fragmentsBuilder);
     }
 }

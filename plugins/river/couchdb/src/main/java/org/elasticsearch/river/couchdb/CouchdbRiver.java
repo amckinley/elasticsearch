@@ -32,20 +32,29 @@ import org.elasticsearch.common.io.Closeables;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.util.concurrent.jsr166y.LinkedTransferQueue;
-import org.elasticsearch.common.util.concurrent.jsr166y.TransferQueue;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.indices.IndexAlreadyExistsException;
-import org.elasticsearch.river.*;
+import org.elasticsearch.river.AbstractRiverComponent;
+import org.elasticsearch.river.River;
+import org.elasticsearch.river.RiverIndexName;
+import org.elasticsearch.river.RiverName;
+import org.elasticsearch.river.RiverSettings;
 import org.elasticsearch.script.ExecutableScript;
 import org.elasticsearch.script.ScriptService;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.elasticsearch.client.Requests.*;
@@ -53,6 +62,7 @@ import static org.elasticsearch.common.xcontent.XContentFactory.*;
 
 /**
  * @author kimchy (shay.banon)
+ * @author dadoonet (David Pilato) for attachments filter
  */
 public class CouchdbRiver extends AbstractRiverComponent implements River {
 
@@ -66,11 +76,13 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
     private final String couchFilter;
     private final String couchFilterParamsUrl;
     private final String basicAuth;
+    private final boolean couchIgnoreAttachments;
 
     private final String indexName;
     private final String typeName;
     private final int bulkSize;
     private final TimeValue bulkTimeout;
+    private final int throttleSize;
 
     private final ExecutableScript script;
 
@@ -78,7 +90,7 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
     private volatile Thread indexerThread;
     private volatile boolean closed;
 
-    private final TransferQueue<String> stream = new LinkedTransferQueue<String>();
+    private final BlockingQueue<String> stream;
 
     @SuppressWarnings({"unchecked"})
     @Inject public CouchdbRiver(RiverName riverName, RiverSettings settings, @RiverIndexName String riverIndexName, Client client, ScriptService scriptService) {
@@ -106,6 +118,7 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
             } else {
                 couchFilterParamsUrl = null;
             }
+            couchIgnoreAttachments = XContentMapValues.nodeBooleanValue(couchSettings.get("ignore_attachments"), false);
             if (couchSettings.containsKey("user") && couchSettings.containsKey("password")) {
                 String user = couchSettings.get("user").toString();
                 String password = couchSettings.get("password").toString();
@@ -125,6 +138,7 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
             couchDb = "db";
             couchFilter = null;
             couchFilterParamsUrl = null;
+            couchIgnoreAttachments = false;
             basicAuth = null;
             script = null;
         }
@@ -139,11 +153,18 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
             } else {
                 bulkTimeout = TimeValue.timeValueMillis(10);
             }
+            throttleSize = XContentMapValues.nodeIntegerValue(indexSettings.get("throttle_size"), bulkSize * 5);
         } else {
             indexName = couchDb;
             typeName = couchDb;
             bulkSize = 100;
             bulkTimeout = TimeValue.timeValueMillis(10);
+            throttleSize = bulkSize * 5;
+        }
+        if (throttleSize == -1) {
+            stream = new LinkedTransferQueue<String>();
+        } else {
+            stream = new ArrayBlockingQueue<String>(throttleSize);
         }
     }
 
@@ -197,7 +218,9 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
 
         // Ignore design documents
         if (id.startsWith("_design/")) {
-            logger.trace("ignoring design document {}", id);
+            if (logger.isTraceEnabled()) {
+                logger.trace("ignoring design document {}", id);
+            }
             return seq;
         }
 
@@ -205,6 +228,8 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
             script.setNextVar("ctx", ctx);
             try {
                 script.run();
+                // we need to unwrap the ctx...
+                ctx = (Map<String, Object>) script.unwrap(ctx);
             } catch (Exception e) {
                 logger.warn("failed to script process {}, ignoring", e, ctx);
                 return seq;
@@ -214,20 +239,59 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
         if (ctx.containsKey("ignore") && ctx.get("ignore").equals(Boolean.TRUE)) {
             // ignore dock
         } else if (ctx.containsKey("deleted") && ctx.get("deleted").equals(Boolean.TRUE)) {
+            String index = extractIndex(ctx);
+            String type = extractType(ctx);
             if (logger.isTraceEnabled()) {
-                logger.trace("processing [delete]: [{}]/[{}]/[{}]", indexName, typeName, id);
+                logger.trace("processing [delete]: [{}]/[{}]/[{}]", index, type, id);
             }
-            bulk.add(deleteRequest(indexName).type(typeName).id(id));
+            bulk.add(deleteRequest(index).type(type).id(id).routing(extractRouting(ctx)).parent(extractParent(ctx)));
         } else if (ctx.containsKey("doc")) {
+            String index = extractIndex(ctx);
+            String type = extractType(ctx);
             Map<String, Object> doc = (Map<String, Object>) ctx.get("doc");
-            if (logger.isTraceEnabled()) {
-                logger.trace("processing [index ]: [{}]/[{}]/[{}], source {}", indexName, typeName, id, doc);
+
+            // Remove _attachment from doc if needed
+            if (couchIgnoreAttachments) {
+                // no need to log that we removed it, the doc indexed will be shown without it
+                doc.remove("_attachments");
+            } else {
+                // TODO by now, couchDB river does not really store attachments but only attachments meta infomration
+                // So we perhaps need to fully support attachments
             }
-            bulk.add(indexRequest(indexName).type(typeName).id(id).source(doc));
+
+            if (logger.isTraceEnabled()) {
+                logger.trace("processing [index ]: [{}]/[{}]/[{}], source {}", index, type, id, doc);
+            }
+
+            bulk.add(indexRequest(index).type(type).id(id).source(doc).routing(extractRouting(ctx)).parent(extractParent(ctx)));
         } else {
             logger.warn("ignoring unknown change {}", s);
         }
         return seq;
+    }
+
+    private String extractParent(Map<String, Object> ctx) {
+        return (String) ctx.get("_parent");
+    }
+
+    private String extractRouting(Map<String, Object> ctx) {
+        return (String) ctx.get("_routing");
+    }
+
+    private String extractType(Map<String, Object> ctx) {
+        String type = (String) ctx.get("_type");
+        if (type == null) {
+            type = typeName;
+        }
+        return type;
+    }
+
+    private String extractIndex(Map<String, Object> ctx) {
+        String index = (String) ctx.get("_index");
+        if (index == null) {
+            index = indexName;
+        }
+        return index;
     }
 
     private class Indexer implements Runnable {
@@ -338,6 +402,7 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
                         file = file + couchFilterParamsUrl;
                     }
                 }
+
                 if (lastSeq != null) {
                     file = file + "&since=" + lastSeq;
                 }
@@ -371,7 +436,8 @@ public class CouchdbRiver extends AbstractRiverComponent implements River {
                         if (logger.isTraceEnabled()) {
                             logger.trace("[couchdb] {}", line);
                         }
-                        stream.add(line);
+                        // we put here, so we block if there is no space to add
+                        stream.put(line);
                     }
                 } catch (Exception e) {
                     Closeables.closeQuietly(is);

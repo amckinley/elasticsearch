@@ -27,7 +27,6 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.search.Filter;
 import org.apache.lucene.search.Query;
 import org.elasticsearch.ElasticSearchException;
-import org.elasticsearch.common.BytesHolder;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.component.CloseableComponent;
 import org.elasticsearch.common.lease.Releasable;
@@ -186,6 +185,7 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
 
         private boolean full = false;
         private boolean refresh = false;
+        private boolean force = false;
 
         /**
          * Should a refresh be performed after flushing. Defaults to <tt>false</tt>.
@@ -217,8 +217,17 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
             return this;
         }
 
+        public boolean force() {
+            return this.force;
+        }
+
+        public Flush force(boolean force) {
+            this.force = force;
+            return this;
+        }
+
         @Override public String toString() {
-            return "full[" + full + "], refresh[" + refresh + "]";
+            return "full[" + full + "], refresh[" + refresh + "], force[" + force + "]";
         }
     }
 
@@ -317,6 +326,9 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
         private VersionType versionType = VersionType.INTERNAL;
         private Origin origin = Origin.PRIMARY;
 
+        private long startTime;
+        private long endTime;
+
         public Create(DocumentMapper docMapper, Term uid, ParsedDocument doc) {
             this.docMapper = docMapper;
             this.uid = uid;
@@ -360,6 +372,14 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
             return this.doc.routing();
         }
 
+        public long timestamp() {
+            return this.doc.timestamp();
+        }
+
+        public long ttl() {
+            return this.doc.ttl();
+        }
+
         public long version() {
             return this.version;
         }
@@ -394,8 +414,41 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
             return this.doc.source();
         }
 
+        public int sourceOffset() {
+            return this.doc.sourceOffset();
+        }
+
+        public int sourceLength() {
+            return this.doc.sourceLength();
+        }
+
         public UidField uidField() {
-            return (UidField) doc.masterDoc().getFieldable(UidFieldMapper.NAME);
+            return (UidField) doc.rootDoc().getFieldable(UidFieldMapper.NAME);
+        }
+
+
+        public Create startTime(long startTime) {
+            this.startTime = startTime;
+            return this;
+        }
+
+        /**
+         * Returns operation start time in nanoseconds.
+         */
+        public long startTime() {
+            return this.startTime;
+        }
+
+        public Create endTime(long endTime) {
+            this.endTime = endTime;
+            return this;
+        }
+
+        /**
+         * Returns operation end time in nanoseconds.
+         */
+        public long endTime() {
+            return this.endTime;
         }
     }
 
@@ -406,6 +459,9 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
         private long version;
         private VersionType versionType = VersionType.INTERNAL;
         private Origin origin = Origin.PRIMARY;
+
+        private long startTime;
+        private long endTime;
 
         public Index(DocumentMapper docMapper, Term uid, ParsedDocument doc) {
             this.docMapper = docMapper;
@@ -480,12 +536,52 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
             return this.doc.parent();
         }
 
+        public long timestamp() {
+            return this.doc.timestamp();
+        }
+
+        public long ttl() {
+            return this.doc.ttl();
+        }
+
         public byte[] source() {
             return this.doc.source();
         }
 
+        public int sourceOffset() {
+            return this.doc.sourceOffset();
+        }
+
+        public int sourceLength() {
+            return this.doc.sourceLength();
+        }
+
         public UidField uidField() {
-            return (UidField) doc.masterDoc().getFieldable(UidFieldMapper.NAME);
+            return (UidField) doc.rootDoc().getFieldable(UidFieldMapper.NAME);
+        }
+
+        public Index startTime(long startTime) {
+            this.startTime = startTime;
+            return this;
+        }
+
+        /**
+         * Returns operation start time in nanoseconds.
+         */
+        public long startTime() {
+            return this.startTime;
+        }
+
+        public Index endTime(long endTime) {
+            this.endTime = endTime;
+            return this;
+        }
+
+        /**
+         * Returns operation end time in nanoseconds.
+         */
+        public long endTime() {
+            return this.endTime;
         }
     }
 
@@ -497,6 +593,9 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
         private VersionType versionType = VersionType.INTERNAL;
         private Origin origin = Origin.PRIMARY;
         private boolean notFound;
+
+        private long startTime;
+        private long endTime;
 
         public Delete(String type, String id, Term uid) {
             this.type = type;
@@ -555,6 +654,31 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
             this.notFound = notFound;
             return this;
         }
+
+
+        public Delete startTime(long startTime) {
+            this.startTime = startTime;
+            return this;
+        }
+
+        /**
+         * Returns operation start time in nanoseconds.
+         */
+        public long startTime() {
+            return this.startTime;
+        }
+
+        public Delete endTime(long endTime) {
+            this.endTime = endTime;
+            return this;
+        }
+
+        /**
+         * Returns operation end time in nanoseconds.
+         */
+        public long endTime() {
+            return this.endTime;
+        }
     }
 
     static class DeleteByQuery {
@@ -563,6 +687,9 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
         private final String[] filteringAliases;
         private final Filter aliasFilter;
         private final String[] types;
+
+        private long startTime;
+        private long endTime;
 
         public DeleteByQuery(Query query, byte[] source, @Nullable String[] filteringAliases, @Nullable Filter aliasFilter, String... types) {
             this.query = query;
@@ -591,12 +718,37 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
         public Filter aliasFilter() {
             return aliasFilter;
         }
+
+        public DeleteByQuery startTime(long startTime) {
+            this.startTime = startTime;
+            return this;
+        }
+
+        /**
+         * Returns operation start time in nanoseconds.
+         */
+        public long startTime() {
+            return this.startTime;
+        }
+
+        public DeleteByQuery endTime(long endTime) {
+            this.endTime = endTime;
+            return this;
+        }
+
+        /**
+         * Returns operation end time in nanoseconds.
+         */
+        public long endTime() {
+            return this.endTime;
+        }
     }
 
 
     static class Get {
         private final boolean realtime;
         private final Term uid;
+        private boolean loadSource = true;
 
         public Get(boolean realtime, Term uid) {
             this.realtime = realtime;
@@ -610,18 +762,27 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
         public Term uid() {
             return uid;
         }
+
+        public boolean loadSource() {
+            return this.loadSource;
+        }
+
+        public Get loadSource(boolean loadSource) {
+            this.loadSource = loadSource;
+            return this;
+        }
     }
 
     static class GetResult {
         private final boolean exists;
         private final long version;
-        private final BytesHolder source;
+        private final Translog.Source source;
         private final UidField.DocIdAndVersion docIdAndVersion;
         private final Searcher searcher;
 
         public static final GetResult NOT_EXISTS = new GetResult(false, -1, null);
 
-        public GetResult(boolean exists, long version, BytesHolder source) {
+        public GetResult(boolean exists, long version, @Nullable Translog.Source source) {
             this.source = source;
             this.exists = exists;
             this.version = version;
@@ -645,7 +806,7 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
             return this.version;
         }
 
-        public BytesHolder source() {
+        @Nullable public Translog.Source source() {
             return source;
         }
 
@@ -655,6 +816,12 @@ public interface Engine extends IndexShardComponent, CloseableComponent {
 
         public UidField.DocIdAndVersion docIdAndVersion() {
             return docIdAndVersion;
+        }
+
+        public void release() {
+            if (searcher != null) {
+                searcher.release();
+            }
         }
     }
 

@@ -28,6 +28,7 @@ import org.elasticsearch.action.support.replication.ReplicationType;
 import org.elasticsearch.common.collect.Lists;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContent;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -60,10 +61,11 @@ public class BulkRequest implements ActionRequest {
      * (for example, if no id is provided, one will be generated, or usage of the create flag).
      */
     public BulkRequest add(IndexRequest request) {
-        // if the source is from a builder, we need to copy it over before adding the next one, which can come from a builder as well...
-        if (request.sourceFromBuilder()) {
-            request.beforeLocalFork();
-        }
+        request.beforeLocalFork();
+        return internalAdd(request);
+    }
+
+    private BulkRequest internalAdd(IndexRequest request) {
         requests.add(request);
         return this;
     }
@@ -112,6 +114,8 @@ public class BulkRequest implements ActionRequest {
             String id = null;
             String routing = null;
             String parent = null;
+            String timestamp = null;
+            Long ttl = null;
             String opType = null;
             long version = 0;
             VersionType versionType = VersionType.INTERNAL;
@@ -132,6 +136,14 @@ public class BulkRequest implements ActionRequest {
                         routing = parser.text();
                     } else if ("_parent".equals(currentFieldName) || "parent".equals(currentFieldName)) {
                         parent = parser.text();
+                    } else if ("_timestamp".equals(currentFieldName) || "timestamp".equals(currentFieldName)) {
+                        timestamp = parser.text();
+                    } else if ("_ttl".equals(currentFieldName) || "ttl".equals(currentFieldName)) {
+                        if (parser.currentToken() == XContentParser.Token.VALUE_STRING) {
+                            ttl = TimeValue.parseTimeValue(parser.text(), null).millis();
+                        } else {
+                            ttl = parser.longValue();
+                        }
                     } else if ("op_type".equals(currentFieldName) || "opType".equals(currentFieldName)) {
                         opType = parser.text();
                     } else if ("_version".equals(currentFieldName) || "version".equals(currentFieldName)) {
@@ -145,26 +157,28 @@ public class BulkRequest implements ActionRequest {
             }
 
             if ("delete".equals(action)) {
-                add(new DeleteRequest(index, type, id).parent(parent).versionType(versionType).routing(routing));
+                add(new DeleteRequest(index, type, id).parent(parent).version(version).versionType(versionType).routing(routing));
             } else {
                 nextMarker = findNextMarker(marker, from, data, length);
                 if (nextMarker == -1) {
                     break;
                 }
                 // order is important, we set parent after routing, so routing will be set to parent if not set explicitly
+                // we use internalAdd so we don't fork here, this allows us not to copy over the big byte array to small chunks
+                // of index request. All index requests are still unsafe if applicable.
                 if ("index".equals(action)) {
                     if (opType == null) {
-                        add(new IndexRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType)
+                        internalAdd(new IndexRequest(index, type, id).routing(routing).parent(parent).timestamp(timestamp).ttl(ttl).version(version).versionType(versionType)
                                 .source(data, from, nextMarker - from, contentUnsafe)
                                 .percolate(percolate));
                     } else {
-                        add(new IndexRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType)
+                        internalAdd(new IndexRequest(index, type, id).routing(routing).parent(parent).timestamp(timestamp).ttl(ttl).version(version).versionType(versionType)
                                 .create("create".equals(opType))
                                 .source(data, from, nextMarker - from, contentUnsafe)
                                 .percolate(percolate));
                     }
                 } else if ("create".equals(action)) {
-                    add(new IndexRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType)
+                    internalAdd(new IndexRequest(index, type, id).routing(routing).parent(parent).timestamp(timestamp).ttl(ttl).version(version).versionType(versionType)
                             .create(true)
                             .source(data, from, nextMarker - from, contentUnsafe)
                             .percolate(percolate));

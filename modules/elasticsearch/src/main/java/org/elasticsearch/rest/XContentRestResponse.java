@@ -51,12 +51,6 @@ public class XContentRestResponse extends AbstractRestResponse {
 
     private final XContentBuilder builder;
 
-    public XContentRestResponse(RestRequest request, RestStatus status) {
-        this.builder = null;
-        this.status = status;
-        this.prefixUtf8Result = startJsonp(request);
-    }
-
     public XContentRestResponse(RestRequest request, RestStatus status, XContentBuilder builder) throws IOException {
         this.builder = builder;
         this.status = status;
@@ -76,11 +70,11 @@ public class XContentRestResponse extends AbstractRestResponse {
     }
 
     @Override public byte[] content() throws IOException {
-        return builder.unsafeBytes();
+        return builder.underlyingBytes();
     }
 
     @Override public int contentLength() throws IOException {
-        return builder.unsafeBytesLength();
+        return builder.underlyingBytesLength();
     }
 
     @Override public RestStatus status() {

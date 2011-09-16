@@ -29,7 +29,6 @@ import org.elasticsearch.action.support.broadcast.TransportBroadcastOperationAct
 import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.routing.GroupShardsIterator;
-import org.elasticsearch.cluster.routing.ShardIterator;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -40,10 +39,10 @@ import org.elasticsearch.index.gateway.IndexShardGatewayService;
 import org.elasticsearch.index.gateway.SnapshotStatus;
 import org.elasticsearch.index.service.InternalIndexService;
 import org.elasticsearch.index.shard.IndexShardState;
-import org.elasticsearch.index.shard.recovery.RecoveryStatus;
-import org.elasticsearch.index.shard.recovery.RecoveryTarget;
 import org.elasticsearch.index.shard.service.InternalIndexShard;
 import org.elasticsearch.indices.IndicesService;
+import org.elasticsearch.indices.recovery.RecoveryStatus;
+import org.elasticsearch.indices.recovery.RecoveryTarget;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 
@@ -70,7 +69,7 @@ public class TransportIndicesStatusAction extends TransportBroadcastOperationAct
     }
 
     @Override protected String executor() {
-        return ThreadPool.Names.CACHED;
+        return ThreadPool.Names.MANAGEMENT;
     }
 
     @Override protected String transportAction() {
@@ -93,21 +92,7 @@ public class TransportIndicesStatusAction extends TransportBroadcastOperationAct
      * Status goes across *all* shards.
      */
     @Override protected GroupShardsIterator shards(IndicesStatusRequest request, String[] concreteIndices, ClusterState clusterState) {
-        return clusterState.routingTable().allShardsGrouped(concreteIndices);
-    }
-
-    /**
-     * We want to go over all assigned nodes (to get recovery status) and not just active ones.
-     */
-    @Override protected ShardRouting nextShardOrNull(ShardIterator shardIt) {
-        return shardIt.nextAssignedOrNull();
-    }
-
-    /**
-     * We want to go over all assigned nodes (to get recovery status) and not just active ones.
-     */
-    @Override protected boolean hasNextShard(ShardIterator shardIt) {
-        return shardIt.hasNextAssigned();
+        return clusterState.routingTable().allAssignedShardsGrouped(concreteIndices, true);
     }
 
     @Override protected IndicesStatusResponse newResponse(IndicesStatusRequest request, AtomicReferenceArray shardsResponses, ClusterState clusterState) {
@@ -171,6 +156,7 @@ public class TransportIndicesStatusAction extends TransportBroadcastOperationAct
 
             shardStatus.mergeStats = indexShard.mergeScheduler().stats();
             shardStatus.refreshStats = indexShard.refreshStats();
+            shardStatus.flushStats = indexShard.flushStats();
         }
 
         if (request.recovery) {

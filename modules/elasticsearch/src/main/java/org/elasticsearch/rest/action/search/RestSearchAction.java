@@ -43,7 +43,6 @@ import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.sort.SortOrder;
 
 import java.io.IOException;
-import java.util.regex.Pattern;
 
 import static org.elasticsearch.common.unit.TimeValue.*;
 import static org.elasticsearch.rest.RestRequest.Method.*;
@@ -54,15 +53,6 @@ import static org.elasticsearch.rest.action.support.RestXContentBuilder.*;
  * @author kimchy (shay.banon)
  */
 public class RestSearchAction extends BaseRestHandler {
-
-    private final static Pattern fieldsPattern;
-
-    private final static Pattern indicesBoostPattern;
-
-    static {
-        fieldsPattern = Pattern.compile(",");
-        indicesBoostPattern = Pattern.compile(",");
-    }
 
     @Inject public RestSearchAction(Settings settings, Client client, RestController controller) {
         super(settings, client);
@@ -79,12 +69,14 @@ public class RestSearchAction extends BaseRestHandler {
         try {
             searchRequest = parseSearchRequest(request);
             searchRequest.listenerThreaded(false);
-            SearchOperationThreading operationThreading = SearchOperationThreading.fromString(request.param("operation_threading"), SearchOperationThreading.SINGLE_THREAD);
-            if (operationThreading == SearchOperationThreading.NO_THREADS) {
-                // since we don't spawn, don't allow no_threads, but change it to a single thread
-                operationThreading = SearchOperationThreading.SINGLE_THREAD;
+            SearchOperationThreading operationThreading = SearchOperationThreading.fromString(request.param("operation_threading"), null);
+            if (operationThreading != null) {
+                if (operationThreading == SearchOperationThreading.NO_THREADS) {
+                    // since we don't spawn, don't allow no_threads, but change it to a single thread
+                    operationThreading = SearchOperationThreading.SINGLE_THREAD;
+                }
+                searchRequest.operationThreading(operationThreading);
             }
-            searchRequest.operationThreading(operationThreading);
         } catch (Exception e) {
             if (logger.isDebugEnabled()) {
                 logger.debug("failed to parse search request parameters", e);
@@ -155,12 +147,14 @@ public class RestSearchAction extends BaseRestHandler {
     }
 
     private SearchSourceBuilder parseSearchSource(RestRequest request) {
-        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
+        SearchSourceBuilder searchSourceBuilder = null;
         String queryString = request.param("q");
         if (queryString != null) {
             QueryStringQueryBuilder queryBuilder = QueryBuilders.queryString(queryString);
             queryBuilder.defaultField(request.param("df"));
             queryBuilder.analyzer(request.param("analyzer"));
+            queryBuilder.analyzeWildcard(request.paramAsBoolean("analyze_wildcard", false));
+            queryBuilder.lowercaseExpandedTerms(request.paramAsBoolean("lowercase_expanded_terms", true));
             String defaultOperator = request.param("default_operator");
             if (defaultOperator != null) {
                 if ("OR".equals(defaultOperator)) {
@@ -171,28 +165,49 @@ public class RestSearchAction extends BaseRestHandler {
                     throw new ElasticSearchIllegalArgumentException("Unsupported defaultOperator [" + defaultOperator + "], can either be [OR] or [AND]");
                 }
             }
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
             searchSourceBuilder.query(queryBuilder);
         }
 
         int from = request.paramAsInt("from", -1);
         if (from != -1) {
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
             searchSourceBuilder.from(from);
         }
         int size = request.paramAsInt("size", -1);
         if (size != -1) {
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
             searchSourceBuilder.size(size);
         }
 
-
-        searchSourceBuilder.explain(request.paramAsBoolean("explain", null));
-        searchSourceBuilder.version(request.paramAsBoolean("version", null));
+        if (request.hasParam("explain")) {
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
+            searchSourceBuilder.explain(request.paramAsBooleanOptional("explain", null));
+        }
+        if (request.hasParam("version")) {
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
+            searchSourceBuilder.version(request.paramAsBooleanOptional("version", null));
+        }
 
         String sField = request.param("fields");
         if (sField != null) {
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
             if (!Strings.hasText(sField)) {
                 searchSourceBuilder.noFields();
             } else {
-                String[] sFields = fieldsPattern.split(sField);
+                String[] sFields = Strings.splitStringByCommaToArray(sField);
                 if (sFields != null) {
                     for (String field : sFields) {
                         searchSourceBuilder.field(field);
@@ -203,7 +218,10 @@ public class RestSearchAction extends BaseRestHandler {
 
         String sSorts = request.param("sort");
         if (sSorts != null) {
-            String[] sorts = fieldsPattern.split(sSorts);
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
+            String[] sorts = Strings.splitStringByCommaToArray(sSorts);
             for (String sort : sorts) {
                 int delimiter = sort.lastIndexOf(":");
                 if (delimiter != -1) {
@@ -222,7 +240,10 @@ public class RestSearchAction extends BaseRestHandler {
 
         String sIndicesBoost = request.param("indices_boost");
         if (sIndicesBoost != null) {
-            String[] indicesBoost = indicesBoostPattern.split(sIndicesBoost);
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
+            String[] indicesBoost = Strings.splitStringByCommaToArray(sIndicesBoost);
             for (String indexBoost : indicesBoost) {
                 int divisor = indexBoost.indexOf(',');
                 if (divisor == -1) {
@@ -236,6 +257,14 @@ public class RestSearchAction extends BaseRestHandler {
                     throw new ElasticSearchIllegalArgumentException("Illegal index boost [" + indexBoost + "], boost not a float number");
                 }
             }
+        }
+
+        String sStats = request.param("stats");
+        if (sStats != null) {
+            if (searchSourceBuilder == null) {
+                searchSourceBuilder = new SearchSourceBuilder();
+            }
+            searchSourceBuilder.stats(Strings.splitStringByCommaToArray(sStats));
         }
 
         return searchSourceBuilder;

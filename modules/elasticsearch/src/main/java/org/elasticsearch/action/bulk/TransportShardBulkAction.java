@@ -122,8 +122,9 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                         }
                     }
 
-                    SourceToParse sourceToParse = SourceToParse.source(indexRequest.source()).type(indexRequest.type()).id(indexRequest.id())
-                            .routing(indexRequest.routing()).parent(indexRequest.parent());
+                    SourceToParse sourceToParse = SourceToParse.source(indexRequest.underlyingSource(), indexRequest.underlyingSourceOffset(), indexRequest.underlyingSourceLength()).type(indexRequest.type()).id(indexRequest.id())
+                            .routing(indexRequest.routing()).parent(indexRequest.parent()).timestamp(indexRequest.timestamp()).ttl(indexRequest.ttl());
+
                     long version;
                     Engine.IndexingOperation op;
                     if (indexRequest.opType() == IndexRequest.OpType.INDEX) {
@@ -157,9 +158,7 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                     responses[i] = new BulkItemResponse(item.id(), indexRequest.opType().toString().toLowerCase(),
                             new IndexResponse(indexRequest.index(), indexRequest.type(), indexRequest.id(), version));
                 } catch (Exception e) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("[" + shardRequest.request.index() + "][" + shardRequest.shardId + "]" + ": Failed to execute bulk item (index) [" + indexRequest + "]", e);
-                    }
+                    logger.debug("[{}][{}] failed to bulk item (index) {}", e, shardRequest.request.index(), shardRequest.shardId, indexRequest);
                     responses[i] = new BulkItemResponse(item.id(), indexRequest.opType().toString().toLowerCase(),
                             new BulkItemResponse.Failure(indexRequest.index(), indexRequest.type(), indexRequest.id(), ExceptionsHelper.detailedMessage(e)));
                 }
@@ -175,9 +174,7 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
                     responses[i] = new BulkItemResponse(item.id(), "delete",
                             new DeleteResponse(deleteRequest.index(), deleteRequest.type(), deleteRequest.id(), delete.version(), delete.notFound()));
                 } catch (Exception e) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("[" + shardRequest.request.index() + "][" + shardRequest.shardId + "]" + ": Failed to execute bulk item (delete) [" + deleteRequest + "]", e);
-                    }
+                    logger.debug("[{}][{}] failed to bulk item (delete) {}", e, shardRequest.request.index(), shardRequest.shardId, deleteRequest);
                     responses[i] = new BulkItemResponse(item.id(), "delete",
                             new BulkItemResponse.Failure(deleteRequest.index(), deleteRequest.type(), deleteRequest.id(), ExceptionsHelper.detailedMessage(e)));
                 }
@@ -235,8 +232,9 @@ public class TransportShardBulkAction extends TransportShardReplicationOperation
             if (item.request() instanceof IndexRequest) {
                 IndexRequest indexRequest = (IndexRequest) item.request();
                 try {
-                    SourceToParse sourceToParse = SourceToParse.source(indexRequest.source()).type(indexRequest.type()).id(indexRequest.id())
-                            .routing(indexRequest.routing()).parent(indexRequest.parent());
+                    SourceToParse sourceToParse = SourceToParse.source(indexRequest.underlyingSource(), indexRequest.underlyingSourceOffset(), indexRequest.underlyingSourceLength()).type(indexRequest.type()).id(indexRequest.id())
+                            .routing(indexRequest.routing()).parent(indexRequest.parent()).timestamp(indexRequest.timestamp()).ttl(indexRequest.ttl());
+
                     if (indexRequest.opType() == IndexRequest.OpType.INDEX) {
                         Engine.Index index = indexShard.prepareIndex(sourceToParse).version(indexRequest.version()).origin(Engine.Operation.Origin.REPLICA);
                         indexShard.index(index);

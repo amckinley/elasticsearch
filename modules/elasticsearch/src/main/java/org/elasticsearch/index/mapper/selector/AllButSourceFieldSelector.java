@@ -19,16 +19,16 @@
 
 package org.elasticsearch.index.mapper.selector;
 
-import org.apache.lucene.document.FieldSelector;
 import org.apache.lucene.document.FieldSelectorResult;
+import org.elasticsearch.common.lucene.document.ResetFieldSelector;
 import org.elasticsearch.index.mapper.internal.SourceFieldMapper;
 
 /**
- * An optimized field selector that loads just the uid and the source.
+ * A field selector that loads all fields except the source field.
  *
  * @author kimchy (shay.banon)
  */
-public class AllButSourceFieldSelector implements FieldSelector {
+public class AllButSourceFieldSelector implements ResetFieldSelector {
 
     public static final AllButSourceFieldSelector INSTANCE = new AllButSourceFieldSelector();
 
@@ -37,5 +37,8 @@ public class AllButSourceFieldSelector implements FieldSelector {
             return FieldSelectorResult.NO_LOAD;
         }
         return FieldSelectorResult.LOAD;
+    }
+
+    @Override public void reset() {
     }
 }

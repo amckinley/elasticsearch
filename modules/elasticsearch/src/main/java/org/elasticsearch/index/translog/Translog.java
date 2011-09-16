@@ -88,6 +88,11 @@ public interface Translog extends IndexShardComponent {
     void makeTransientCurrent();
 
     /**
+     * Reverts back to not have a transient translog.
+     */
+    void revertTransient();
+
+    /**
      * Adds a create operation to the transaction log.
      */
     Location add(Operation operation) throws TranslogException;
@@ -218,24 +223,50 @@ public interface Translog extends IndexShardComponent {
 
         long estimateSize();
 
-        BytesHolder readSource(BytesStreamInput in) throws IOException;
+        Source readSource(BytesStreamInput in) throws IOException;
+    }
+
+    static class Source {
+        public final BytesHolder source;
+        public final String routing;
+        public final String parent;
+        public final long timestamp;
+        public final long ttl;
+
+        public Source(BytesHolder source, String routing, String parent, long timestamp, long ttl) {
+            this.source = source;
+            this.routing = routing;
+            this.parent = parent;
+            this.timestamp = timestamp;
+            this.ttl = ttl;
+        }
     }
 
     static class Create implements Operation {
         private String id;
         private String type;
         private byte[] source;
+        private int sourceOffset;
+        private int sourceLength;
         private String routing;
         private String parent;
+        private long timestamp;
+        private long ttl;
         private long version;
 
         public Create() {
         }
 
         public Create(Engine.Create create) {
-            this(create.type(), create.id(), create.source());
+            this.id = create.id();
+            this.type = create.type();
+            this.source = create.source();
+            this.sourceOffset = create.sourceOffset();
+            this.sourceLength = create.sourceLength();
             this.routing = create.routing();
             this.parent = create.parent();
+            this.timestamp = create.timestamp();
+            this.ttl = create.ttl();
             this.version = create.version();
         }
 
@@ -243,6 +274,8 @@ public interface Translog extends IndexShardComponent {
             this.id = id;
             this.type = type;
             this.source = source;
+            this.sourceOffset = 0;
+            this.sourceLength = source.length;
         }
 
         @Override public Type opType() {
@@ -261,6 +294,14 @@ public interface Translog extends IndexShardComponent {
             return this.source;
         }
 
+        public int sourceOffset() {
+            return this.sourceOffset;
+        }
+
+        public int sourceLength() {
+            return this.sourceLength;
+        }
+
         public String type() {
             return this.type;
         }
@@ -273,25 +314,56 @@ public interface Translog extends IndexShardComponent {
             return this.parent;
         }
 
+        public long timestamp() {
+            return this.timestamp;
+        }
+
+        public long ttl() {
+            return this.ttl;
+        }
+
         public long version() {
             return this.version;
         }
 
-        @Override public BytesHolder readSource(BytesStreamInput in) throws IOException {
+        @Override public Source readSource(BytesStreamInput in) throws IOException {
             int version = in.readVInt(); // version
             id = in.readUTF();
             type = in.readUTF();
 
             int length = in.readVInt();
             int offset = in.position();
-            return new BytesHolder(in.underlyingBuffer(), offset, length);
+            BytesHolder source = new BytesHolder(in.underlyingBuffer(), offset, length);
+            in.skip(length);
+            if (version >= 1) {
+                if (in.readBoolean()) {
+                    routing = in.readUTF();
+                }
+            }
+            if (version >= 2) {
+                if (in.readBoolean()) {
+                    parent = in.readUTF();
+                }
+            }
+            if (version >= 3) {
+                this.version = in.readLong();
+            }
+            if (version >= 4) {
+                this.timestamp = in.readLong();
+            }
+            if (version >= 5) {
+                this.ttl = in.readLong();
+            }
+            return new Source(source, routing, parent, timestamp, ttl);
         }
 
         @Override public void readFrom(StreamInput in) throws IOException {
             int version = in.readVInt(); // version
             id = in.readUTF();
             type = in.readUTF();
-            source = new byte[in.readVInt()];
+            sourceOffset = 0;
+            sourceLength = in.readVInt();
+            source = new byte[sourceLength];
             in.readFully(source);
             if (version >= 1) {
                 if (in.readBoolean()) {
@@ -306,14 +378,20 @@ public interface Translog extends IndexShardComponent {
             if (version >= 3) {
                 this.version = in.readLong();
             }
+            if (version >= 4) {
+                this.timestamp = in.readLong();
+            }
+            if (version >= 5) {
+                this.ttl = in.readLong();
+            }
         }
 
         @Override public void writeTo(StreamOutput out) throws IOException {
-            out.writeVInt(3); // version
+            out.writeVInt(5); // version
             out.writeUTF(id);
             out.writeUTF(type);
-            out.writeVInt(source.length);
-            out.writeBytes(source);
+            out.writeVInt(sourceLength);
+            out.writeBytes(source, sourceOffset, sourceLength);
             if (routing == null) {
                 out.writeBoolean(false);
             } else {
@@ -327,6 +405,8 @@ public interface Translog extends IndexShardComponent {
                 out.writeUTF(parent);
             }
             out.writeLong(version);
+            out.writeLong(timestamp);
+            out.writeLong(ttl);
         }
     }
 
@@ -335,23 +415,35 @@ public interface Translog extends IndexShardComponent {
         private String type;
         private long version;
         private byte[] source;
+        private int sourceOffset;
+        private int sourceLength;
         private String routing;
         private String parent;
+        private long timestamp;
+        private long ttl;
 
         public Index() {
         }
 
         public Index(Engine.Index index) {
-            this(index.type(), index.id(), index.source());
+            this.id = index.id();
+            this.type = index.type();
+            this.source = index.source();
+            this.sourceOffset = index.sourceOffset();
+            this.sourceLength = index.sourceLength();
             this.routing = index.routing();
             this.parent = index.parent();
             this.version = index.version();
+            this.timestamp = index.timestamp();
+            this.ttl = index.ttl();
         }
 
         public Index(String type, String id, byte[] source) {
             this.type = type;
             this.id = id;
             this.source = source;
+            this.sourceOffset = 0;
+            this.sourceLength = source.length;
         }
 
         @Override public Type opType() {
@@ -378,29 +470,68 @@ public interface Translog extends IndexShardComponent {
             return this.parent;
         }
 
+        public long timestamp() {
+            return this.timestamp;
+        }
+
+        public long ttl() {
+            return this.ttl;
+        }
+
         public byte[] source() {
             return this.source;
+        }
+
+        public int sourceOffset() {
+            return this.sourceOffset;
+        }
+
+        public int sourceLength() {
+            return this.sourceLength;
         }
 
         public long version() {
             return this.version;
         }
 
-        @Override public BytesHolder readSource(BytesStreamInput in) throws IOException {
+        @Override public Source readSource(BytesStreamInput in) throws IOException {
             int version = in.readVInt(); // version
             id = in.readUTF();
             type = in.readUTF();
 
             int length = in.readVInt();
             int offset = in.position();
-            return new BytesHolder(in.underlyingBuffer(), offset, length);
+            BytesHolder source = new BytesHolder(in.underlyingBuffer(), offset, length);
+            in.skip(length);
+            if (version >= 1) {
+                if (in.readBoolean()) {
+                    routing = in.readUTF();
+                }
+            }
+            if (version >= 2) {
+                if (in.readBoolean()) {
+                    parent = in.readUTF();
+                }
+            }
+            if (version >= 3) {
+                this.version = in.readLong();
+            }
+            if (version >= 4) {
+                this.timestamp = in.readLong();
+            }
+            if (version >= 5) {
+                this.ttl = in.readLong();
+            }
+            return new Source(source, routing, parent, timestamp, ttl);
         }
 
         @Override public void readFrom(StreamInput in) throws IOException {
             int version = in.readVInt(); // version
             id = in.readUTF();
             type = in.readUTF();
-            source = new byte[in.readVInt()];
+            sourceOffset = 0;
+            sourceLength = in.readVInt();
+            source = new byte[sourceLength];
             in.readFully(source);
             if (version >= 1) {
                 if (in.readBoolean()) {
@@ -415,14 +546,20 @@ public interface Translog extends IndexShardComponent {
             if (version >= 3) {
                 this.version = in.readLong();
             }
+            if (version >= 4) {
+                this.timestamp = in.readLong();
+            }
+            if (version >= 5) {
+                this.ttl = in.readLong();
+            }
         }
 
         @Override public void writeTo(StreamOutput out) throws IOException {
-            out.writeVInt(3); // version
+            out.writeVInt(5); // version
             out.writeUTF(id);
             out.writeUTF(type);
-            out.writeVInt(source.length);
-            out.writeBytes(source);
+            out.writeVInt(sourceLength);
+            out.writeBytes(source, sourceOffset, sourceLength);
             if (routing == null) {
                 out.writeBoolean(false);
             } else {
@@ -436,6 +573,8 @@ public interface Translog extends IndexShardComponent {
                 out.writeUTF(parent);
             }
             out.writeLong(version);
+            out.writeLong(timestamp);
+            out.writeLong(ttl);
         }
     }
 
@@ -471,7 +610,7 @@ public interface Translog extends IndexShardComponent {
             return this.version;
         }
 
-        @Override public BytesHolder readSource(BytesStreamInput in) throws IOException {
+        @Override public Source readSource(BytesStreamInput in) throws IOException {
             throw new ElasticSearchIllegalStateException("trying to read doc source from delete operation");
         }
 
@@ -500,7 +639,7 @@ public interface Translog extends IndexShardComponent {
         }
 
         public DeleteByQuery(Engine.DeleteByQuery deleteByQuery) {
-            this(deleteByQuery.source(), deleteByQuery.types());
+            this(deleteByQuery.source(), deleteByQuery.filteringAliases(), deleteByQuery.types());
         }
 
         public DeleteByQuery(byte[] source, String[] filteringAliases, String... types) {
@@ -529,7 +668,7 @@ public interface Translog extends IndexShardComponent {
             return this.types;
         }
 
-        @Override public BytesHolder readSource(BytesStreamInput in) throws IOException {
+        @Override public Source readSource(BytesStreamInput in) throws IOException {
             throw new ElasticSearchIllegalStateException("trying to read doc source from delete_by_query operation");
         }
 

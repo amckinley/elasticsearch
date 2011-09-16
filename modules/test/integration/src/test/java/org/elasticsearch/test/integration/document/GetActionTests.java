@@ -26,6 +26,7 @@ import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.action.get.MultiGetRequest;
 import org.elasticsearch.action.get.MultiGetResponse;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.test.integration.AbstractNodesTests;
 import org.testng.annotations.AfterClass;
@@ -33,6 +34,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import static org.elasticsearch.client.Requests.*;
+import static org.elasticsearch.common.xcontent.XContentFactory.*;
 import static org.hamcrest.MatcherAssert.*;
 import static org.hamcrest.Matchers.*;
 
@@ -52,11 +54,8 @@ public class GetActionTests extends AbstractNodesTests {
     }
 
     @Test public void simpleGetTests() {
-        try {
-            client.admin().indices().prepareDelete("test").execute().actionGet();
-        } catch (Exception e) {
-            // fine
-        }
+        client.admin().indices().prepareDelete().execute().actionGet();
+
         client.admin().indices().prepareCreate("test").setSettings(ImmutableSettings.settingsBuilder().put("index.refresh_interval", -1)).execute().actionGet();
 
         ClusterHealthResponse clusterHealth = client.admin().cluster().health(clusterHealthRequest().waitForGreenStatus()).actionGet();
@@ -74,6 +73,11 @@ public class GetActionTests extends AbstractNodesTests {
         assertThat(response.exists(), equalTo(true));
         assertThat(response.sourceAsMap().get("field1").toString(), equalTo("value1"));
         assertThat(response.sourceAsMap().get("field2").toString(), equalTo("value2"));
+
+        logger.info("--> realtime get 1 (no source)");
+        response = client.prepareGet("test", "type1", "1").setFields(Strings.EMPTY_ARRAY).execute().actionGet();
+        assertThat(response.exists(), equalTo(true));
+        assertThat(response.source(), nullValue());
 
         logger.info("--> realtime get 1 (no type)");
         response = client.prepareGet("test", null, "1").execute().actionGet();
@@ -187,5 +191,29 @@ public class GetActionTests extends AbstractNodesTests {
         assertThat(response.responses().length, equalTo(2));
         assertThat(response.responses()[0].response().source(), nullValue());
         assertThat(response.responses()[0].response().field("field").values().get(0).toString(), equalTo("value1"));
+    }
+
+    @Test public void realtimeGetWithCompress() throws Exception {
+        client.admin().indices().prepareDelete().execute().actionGet();
+
+        client.admin().indices().prepareCreate("test").setSettings(ImmutableSettings.settingsBuilder().put("index.refresh_interval", -1))
+                .addMapping("type", jsonBuilder().startObject().startObject("type").startObject("_source").field("compress", true).endObject().endObject().endObject())
+                .execute().actionGet();
+
+        ClusterHealthResponse clusterHealth = client.admin().cluster().health(clusterHealthRequest().waitForGreenStatus()).actionGet();
+        assertThat(clusterHealth.timedOut(), equalTo(false));
+        assertThat(clusterHealth.status(), equalTo(ClusterHealthStatus.GREEN));
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 10000; i++) {
+            sb.append((char) i);
+        }
+        String fieldValue = sb.toString();
+        client.prepareIndex("test", "type", "1").setSource("field", fieldValue).execute().actionGet();
+
+        // realtime get
+        GetResponse getResponse = client.prepareGet("test", "type", "1").execute().actionGet();
+        assertThat(getResponse.exists(), equalTo(true));
+        assertThat(getResponse.sourceAsMap().get("field").toString(), equalTo(fieldValue));
     }
 }

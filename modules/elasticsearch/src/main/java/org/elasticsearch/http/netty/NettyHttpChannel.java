@@ -39,6 +39,7 @@ import org.elasticsearch.http.HttpException;
 import org.elasticsearch.rest.RestResponse;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.XContentRestResponse;
+import org.elasticsearch.rest.support.RestUtils;
 import org.elasticsearch.transport.netty.NettyTransport;
 
 import java.io.IOException;
@@ -48,10 +49,12 @@ import java.util.Set;
  * @author kimchy (shay.banon)
  */
 public class NettyHttpChannel implements HttpChannel {
+    private final NettyHttpServerTransport transport;
     private final Channel channel;
     private final org.elasticsearch.common.netty.handler.codec.http.HttpRequest request;
 
-    public NettyHttpChannel(Channel channel, org.elasticsearch.common.netty.handler.codec.http.HttpRequest request) {
+    public NettyHttpChannel(NettyHttpServerTransport transport, Channel channel, org.elasticsearch.common.netty.handler.codec.http.HttpRequest request) {
+        this.transport = transport;
         this.channel = channel;
         this.request = request;
     }
@@ -75,13 +78,20 @@ public class NettyHttpChannel implements HttpChannel {
         } else {
             resp = new DefaultHttpResponse(HttpVersion.HTTP_1_1, status);
         }
-        // add support for cross origin
-        resp.addHeader("Access-Control-Allow-Origin", "*");
-        if (request.getMethod() == HttpMethod.OPTIONS) {
-            // also add more access control parameters
-            resp.addHeader("Access-Control-Max-Age", 1728000);
-            resp.addHeader("Access-Control-Allow-Methods", "PUT, DELETE");
-            resp.addHeader("Access-Control-Allow-Headers", "X-Requested-With");
+        if (RestUtils.isBrowser(request.getHeader(HttpHeaders.Names.USER_AGENT))) {
+            // add support for cross origin
+            resp.addHeader("Access-Control-Allow-Origin", "*");
+            if (request.getMethod() == HttpMethod.OPTIONS) {
+                // also add more access control parameters
+                resp.addHeader("Access-Control-Max-Age", 1728000);
+                resp.addHeader("Access-Control-Allow-Methods", "PUT, DELETE");
+                resp.addHeader("Access-Control-Allow-Headers", "X-Requested-With");
+            }
+        }
+
+        String opaque = request.getHeader("X-Opaque-Id");
+        if (opaque != null) {
+            resp.addHeader("X-Opaque-Id", opaque);
         }
 
         // Convert the response content to a ChannelBuffer.
@@ -94,7 +104,7 @@ public class NettyHttpChannel implements HttpChannel {
                 XContentBuilder builder = ((XContentRestResponse) response).builder();
                 if (builder.payload() instanceof CachedStreamOutput.Entry) {
                     releaseContentListener = new NettyTransport.CacheFutureListener((CachedStreamOutput.Entry) builder.payload());
-                    buf = ChannelBuffers.wrappedBuffer(builder.unsafeBytes(), 0, builder.unsafeBytesLength());
+                    buf = ChannelBuffers.wrappedBuffer(builder.underlyingBytes(), 0, builder.underlyingBytesLength());
                 } else if (response.contentThreadSafe()) {
                     buf = ChannelBuffers.wrappedBuffer(response.content(), 0, response.contentLength());
                 } else {
@@ -126,17 +136,19 @@ public class NettyHttpChannel implements HttpChannel {
 
         resp.setHeader(HttpHeaders.Names.CONTENT_LENGTH, String.valueOf(buf.readableBytes()));
 
-        String cookieString = request.getHeader(HttpHeaders.Names.COOKIE);
-        if (cookieString != null) {
-            CookieDecoder cookieDecoder = new CookieDecoder();
-            Set<Cookie> cookies = cookieDecoder.decode(cookieString);
-            if (!cookies.isEmpty()) {
-                // Reset the cookies if necessary.
-                CookieEncoder cookieEncoder = new CookieEncoder(true);
-                for (Cookie cookie : cookies) {
-                    cookieEncoder.addCookie(cookie);
+        if (transport.resetCookies) {
+            String cookieString = request.getHeader(HttpHeaders.Names.COOKIE);
+            if (cookieString != null) {
+                CookieDecoder cookieDecoder = new CookieDecoder();
+                Set<Cookie> cookies = cookieDecoder.decode(cookieString);
+                if (!cookies.isEmpty()) {
+                    // Reset the cookies if necessary.
+                    CookieEncoder cookieEncoder = new CookieEncoder(true);
+                    for (Cookie cookie : cookies) {
+                        cookieEncoder.addCookie(cookie);
+                    }
+                    resp.addHeader(HttpHeaders.Names.SET_COOKIE, cookieEncoder.encode());
                 }
-                resp.addHeader(HttpHeaders.Names.SET_COOKIE, cookieEncoder.encode());
             }
         }
 

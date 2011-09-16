@@ -21,8 +21,10 @@ package org.elasticsearch.index.mapper.date;
 
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.index.mapper.DocumentMapper;
+import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MapperTests;
 import org.elasticsearch.index.mapper.ParsedDocument;
+import org.elasticsearch.index.mapper.core.DateFieldMapper;
 import org.testng.annotations.Test;
 
 import static org.hamcrest.MatcherAssert.*;
@@ -30,6 +32,32 @@ import static org.hamcrest.Matchers.*;
 
 @Test
 public class SimpleDateMappingTests {
+
+    @Test public void testAutomaticDateParser() throws Exception {
+        String mapping = XContentFactory.jsonBuilder().startObject().startObject("type")
+                .startObject("properties").endObject()
+                .endObject().endObject().string();
+
+        DocumentMapper defaultMapper = MapperTests.newParser().parse(mapping);
+
+        ParsedDocument doc = defaultMapper.parse("type", "1", XContentFactory.jsonBuilder()
+                .startObject()
+                .field("date_field1", "2011/01/22")
+                .field("date_field2", "2011/01/22 00:00:00")
+//                .field("date_field3", "2011/01/22 +02")
+//                .field("date_field4", "2011/01/22 00:00:00 +02:00")
+                .endObject()
+                .copiedBytes());
+
+        FieldMapper fieldMapper = defaultMapper.mappers().smartNameFieldMapper("date_field1");
+        assertThat(fieldMapper, instanceOf(DateFieldMapper.class));
+        fieldMapper = defaultMapper.mappers().smartNameFieldMapper("date_field2");
+        assertThat(fieldMapper, instanceOf(DateFieldMapper.class));
+//        fieldMapper = defaultMapper.mappers().smartNameFieldMapper("date_field3");
+//        assertThat(fieldMapper, instanceOf(DateFieldMapper.class));
+//        fieldMapper = defaultMapper.mappers().smartNameFieldMapper("date_field4");
+//        assertThat(fieldMapper, instanceOf(DateFieldMapper.class));
+    }
 
     @Test public void testTimestampAsDate() throws Exception {
         String mapping = XContentFactory.jsonBuilder().startObject().startObject("type")
@@ -45,7 +73,7 @@ public class SimpleDateMappingTests {
                 .endObject()
                 .copiedBytes());
 
-        assertThat(doc.masterDoc().getFieldable("date_field").tokenStreamValue(), notNullValue());
+        assertThat(doc.rootDoc().getFieldable("date_field").tokenStreamValue(), notNullValue());
     }
 
     @Test public void testDateDetection() throws Exception {
@@ -63,7 +91,7 @@ public class SimpleDateMappingTests {
                 .endObject()
                 .copiedBytes());
 
-        assertThat(doc.masterDoc().get("date_field"), nullValue());
-        assertThat(doc.masterDoc().get("date_field_x"), equalTo("2010-01-01"));
+        assertThat(doc.rootDoc().get("date_field"), nullValue());
+        assertThat(doc.rootDoc().get("date_field_x"), equalTo("2010-01-01"));
     }
 }

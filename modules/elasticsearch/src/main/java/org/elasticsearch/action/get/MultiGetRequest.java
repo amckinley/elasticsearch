@@ -67,6 +67,11 @@ public class MultiGetRequest implements ActionRequest {
             return this.index;
         }
 
+        public Item index(String index) {
+            this.index = index;
+            return this;
+        }
+
         public String type() {
             return this.type;
         }
@@ -223,7 +228,7 @@ public class MultiGetRequest implements ActionRequest {
         return this;
     }
 
-    public void add(@Nullable String defaultIndex, @Nullable String defaultType, byte[] data, int from, int length) throws Exception {
+    public void add(@Nullable String defaultIndex, @Nullable String defaultType, @Nullable String[] defaultFields, byte[] data, int from, int length) throws Exception {
         XContentParser parser = XContentFactory.xContent(data, from, length).createParser(data, from, length);
         try {
             XContentParser.Token token;
@@ -264,7 +269,13 @@ public class MultiGetRequest implements ActionRequest {
                                     }
                                 }
                             }
-                            add(new Item(index, type, id).routing(routing).fields(fields == null ? null : fields.toArray(new String[fields.size()])));
+                            String[] aFields;
+                            if (fields != null) {
+                                aFields = fields.toArray(new String[fields.size()]);
+                            } else {
+                                aFields = defaultFields;
+                            }
+                            add(new Item(index, type, id).routing(routing).fields(aFields));
                         }
                     } else if ("ids".equals(currentFieldName)) {
                         while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {

@@ -30,6 +30,8 @@ import org.elasticsearch.common.collect.Sets;
 import org.elasticsearch.common.collect.UnmodifiableIterator;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.regex.Regex;
+import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.trove.set.hash.THashSet;
 import org.elasticsearch.common.util.concurrent.Immutable;
@@ -43,10 +45,10 @@ import org.elasticsearch.indices.IndexMissingException;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 import static org.elasticsearch.common.collect.Lists.*;
 import static org.elasticsearch.common.collect.MapBuilder.*;
@@ -60,12 +62,35 @@ import static org.elasticsearch.common.settings.ImmutableSettings.*;
 @Immutable
 public class MetaData implements Iterable<IndexMetaData> {
 
+    private static ImmutableSet<String> dynamicSettings = ImmutableSet.<String>builder()
+            .build();
+
+    public static ImmutableSet<String> dynamicSettings() {
+        return dynamicSettings;
+    }
+
+    public static boolean hasDynamicSetting(String key) {
+        for (String dynamicSetting : dynamicSettings) {
+            if (Regex.simpleMatch(dynamicSetting, key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static synchronized void addDynamicSettings(String... settings) {
+        HashSet<String> updatedSettings = new HashSet<String>(dynamicSettings);
+        updatedSettings.addAll(Arrays.asList(settings));
+        dynamicSettings = ImmutableSet.copyOf(updatedSettings);
+    }
+
     public static final MetaData EMPTY_META_DATA = newMetaDataBuilder().build();
 
     private final long version;
 
-    public final static Pattern routingPattern = Pattern.compile(",");
-
+    private final Settings transientSettings;
+    private final Settings persistentSettings;
+    private final Settings settings;
     private final ImmutableMap<String, IndexMetaData> indices;
     private final ImmutableMap<String, IndexTemplateMetaData> templates;
 
@@ -83,8 +108,11 @@ public class MetaData implements Iterable<IndexMetaData> {
 
     private final ImmutableMap<String, String[]> aliasAndIndexToIndexMap;
 
-    private MetaData(long version, ImmutableMap<String, IndexMetaData> indices, ImmutableMap<String, IndexTemplateMetaData> templates) {
+    MetaData(long version, Settings transientSettings, Settings persistentSettings, ImmutableMap<String, IndexMetaData> indices, ImmutableMap<String, IndexTemplateMetaData> templates) {
         this.version = version;
+        this.transientSettings = transientSettings;
+        this.persistentSettings = persistentSettings;
+        this.settings = ImmutableSettings.settingsBuilder().put(persistentSettings).put(transientSettings).build();
         this.indices = ImmutableMap.copyOf(indices);
         this.templates = templates;
         int totalNumberOfShards = 0;
@@ -137,7 +165,7 @@ public class MetaData implements Iterable<IndexMetaData> {
                     tmpAliasToIndexToSearchRoutingMap.put(aliasMd.alias(), indexToSearchRoutingMap);
                 }
                 if (aliasMd.searchRouting() != null) {
-                    indexToSearchRoutingMap.put(indexMetaData.index(), ImmutableSet.copyOf(routingPattern.split(aliasMd.searchRouting())));
+                    indexToSearchRoutingMap.put(indexMetaData.index(), ImmutableSet.copyOf(Strings.splitStringByCommaToSet(aliasMd.searchRouting())));
                 } else {
                     indexToSearchRoutingMap.put(indexMetaData.index(), ImmutableSet.<String>of());
                 }
@@ -195,6 +223,21 @@ public class MetaData implements Iterable<IndexMetaData> {
 
     public long version() {
         return this.version;
+    }
+
+    /**
+     * Returns the merges transient and persistent settings.
+     */
+    public Settings settings() {
+        return this.settings;
+    }
+
+    public Settings transientSettings() {
+        return this.transientSettings;
+    }
+
+    public Settings persistentSettings() {
+        return this.persistentSettings;
     }
 
     public ImmutableMap<String, ImmutableMap<String, AliasMetaData>> aliases() {
@@ -272,7 +315,7 @@ public class MetaData implements Iterable<IndexMetaData> {
      */
     private Map<String, Set<String>> resolveSearchRoutingAllIndices(String routing) {
         if (routing != null) {
-            THashSet<String> r = new THashSet<String>(Arrays.asList(routingPattern.split(routing)));
+            Set<String> r = Strings.splitStringByCommaToSet(routing);
             Map<String, Set<String>> routings = newHashMap();
             String[] concreteIndices = concreteAllIndices();
             for (String index : concreteIndices) {
@@ -285,9 +328,9 @@ public class MetaData implements Iterable<IndexMetaData> {
 
     public Map<String, Set<String>> resolveSearchRouting(@Nullable String routing, String aliasOrIndex) {
         Map<String, Set<String>> routings = null;
-        List<String> paramRouting = null;
+        Set<String> paramRouting = null;
         if (routing != null) {
-            paramRouting = Arrays.asList(routingPattern.split(routing));
+            paramRouting = Strings.splitStringByCommaToSet(routing);
         }
 
         ImmutableMap<String, ImmutableSet<String>> indexToRoutingMap = aliasToIndexToSearchRoutingMap.get(aliasOrIndex);
@@ -320,11 +363,7 @@ public class MetaData implements Iterable<IndexMetaData> {
         } else {
             // It's an index
             if (paramRouting != null) {
-                Set<String> r = new THashSet<String>(paramRouting);
-                if (routings == null) {
-                    routings = newHashMap();
-                }
-                routings.put(aliasOrIndex, r);
+                routings = ImmutableMap.of(aliasOrIndex, paramRouting);
             }
         }
         return routings;
@@ -336,20 +375,20 @@ public class MetaData implements Iterable<IndexMetaData> {
             return resolveSearchRoutingAllIndices(routing);
         }
 
-        Map<String, Set<String>> routings = null;
-        List<String> paramRouting = null;
-        // List of indices that don't require any routing
-        Set<String> norouting = newHashSet();
-        if (routing != null) {
-            paramRouting = Arrays.asList(routingPattern.split(routing));
-        }
-
         if (aliasesOrIndices.length == 1) {
             if (aliasesOrIndices[0].equals("_all")) {
                 return resolveSearchRoutingAllIndices(routing);
             } else {
                 return resolveSearchRouting(routing, aliasesOrIndices[0]);
             }
+        }
+
+        Map<String, Set<String>> routings = null;
+        Set<String> paramRouting = null;
+        // List of indices that don't require any routing
+        Set<String> norouting = newHashSet();
+        if (routing != null) {
+            paramRouting = Strings.splitStringByCommaToSet(routing);
         }
 
         for (String aliasOrIndex : aliasesOrIndices) {
@@ -608,11 +647,16 @@ public class MetaData implements Iterable<IndexMetaData> {
 
         private long version;
 
+        private Settings transientSettings = ImmutableSettings.Builder.EMPTY_SETTINGS;
+        private Settings persistentSettings = ImmutableSettings.Builder.EMPTY_SETTINGS;
+
         private MapBuilder<String, IndexMetaData> indices = newMapBuilder();
 
         private MapBuilder<String, IndexTemplateMetaData> templates = newMapBuilder();
 
         public Builder metaData(MetaData metaData) {
+            this.transientSettings = metaData.transientSettings;
+            this.persistentSettings = metaData.persistentSettings;
             this.version = metaData.version;
             this.indices.putAll(metaData.indices);
             this.templates.putAll(metaData.templates);
@@ -681,13 +725,23 @@ public class MetaData implements Iterable<IndexMetaData> {
             return this;
         }
 
+        public Builder transientSettings(Settings settings) {
+            this.transientSettings = settings;
+            return this;
+        }
+
+        public Builder persistentSettings(Settings settings) {
+            this.persistentSettings = settings;
+            return this;
+        }
+
         public Builder version(long version) {
             this.version = version;
             return this;
         }
 
         public MetaData build() {
-            return new MetaData(version, indices.immutableMap(), templates.immutableMap());
+            return new MetaData(version, transientSettings, persistentSettings, indices.immutableMap(), templates.immutableMap());
         }
 
         public static String toXContent(MetaData metaData) throws IOException {
@@ -700,6 +754,14 @@ public class MetaData implements Iterable<IndexMetaData> {
 
         public static void toXContent(MetaData metaData, XContentBuilder builder, ToXContent.Params params) throws IOException {
             builder.startObject("meta-data");
+
+            if (!metaData.persistentSettings().getAsMap().isEmpty()) {
+                builder.startObject("settings");
+                for (Map.Entry<String, String> entry : metaData.persistentSettings().getAsMap().entrySet()) {
+                    builder.field(entry.getKey(), entry.getValue());
+                }
+                builder.endObject();
+            }
 
             builder.startObject("templates");
             for (IndexTemplateMetaData template : metaData.templates().values()) {
@@ -734,7 +796,16 @@ public class MetaData implements Iterable<IndexMetaData> {
                 if (token == XContentParser.Token.FIELD_NAME) {
                     currentFieldName = parser.currentName();
                 } else if (token == XContentParser.Token.START_OBJECT) {
-                    if ("indices".equals(currentFieldName)) {
+                    if ("settings".equals(currentFieldName)) {
+                        ImmutableSettings.Builder settingsBuilder = settingsBuilder();
+                        while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
+                            String key = parser.currentName();
+                            token = parser.nextToken();
+                            String value = parser.text();
+                            settingsBuilder.put(key, value);
+                        }
+                        builder.persistentSettings(settingsBuilder.build());
+                    } else if ("indices".equals(currentFieldName)) {
                         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
                             builder.put(IndexMetaData.Builder.fromXContent(parser));
                         }
@@ -751,6 +822,8 @@ public class MetaData implements Iterable<IndexMetaData> {
         public static MetaData readFrom(StreamInput in) throws IOException {
             Builder builder = new Builder();
             builder.version = in.readLong();
+            builder.transientSettings(readSettingsFromStream(in));
+            builder.persistentSettings(readSettingsFromStream(in));
             int size = in.readVInt();
             for (int i = 0; i < size; i++) {
                 builder.put(IndexMetaData.Builder.readFrom(in));
@@ -764,6 +837,8 @@ public class MetaData implements Iterable<IndexMetaData> {
 
         public static void writeTo(MetaData metaData, StreamOutput out) throws IOException {
             out.writeLong(metaData.version);
+            writeSettingsToStream(metaData.transientSettings(), out);
+            writeSettingsToStream(metaData.persistentSettings(), out);
             out.writeVInt(metaData.indices.size());
             for (IndexMetaData indexMetaData : metaData) {
                 IndexMetaData.Builder.writeTo(indexMetaData, out);

@@ -58,7 +58,8 @@ public class SerialMergeSchedulerProvider extends AbstractIndexShardComponent im
     @Override public MergeStats stats() {
         MergeStats mergeStats = new MergeStats();
         for (CustomSerialMergeScheduler scheduler : schedulers) {
-            mergeStats.add(scheduler.totalMerges(), scheduler.currentMerges(), scheduler.totalMergeTime());
+            mergeStats.add(scheduler.totalMerges(), scheduler.totalMergeTime(), scheduler.totalMergeNumDocs(), scheduler.totalMergeSizeInBytes(),
+                    scheduler.currentMerges(), scheduler.currentMergesNumDocs(), scheduler.currentMergesSizeInBytes());
         }
         return mergeStats;
     }
@@ -86,7 +87,12 @@ public class SerialMergeSchedulerProvider extends AbstractIndexShardComponent im
                 // since we do it outside of a lock in the RobinEngine
                 return;
             }
-            super.merge(writer);
+            try {
+                super.merge(writer);
+            } catch (IOException e) {
+                logger.warn("failed to merge", e);
+                throw e;
+            }
         }
 
         @Override public void close() {

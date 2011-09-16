@@ -61,13 +61,12 @@ import org.elasticsearch.index.service.IndexService;
 import org.elasticsearch.index.settings.IndexSettingsService;
 import org.elasticsearch.index.shard.IndexShardState;
 import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.index.shard.recovery.RecoveryFailedException;
-import org.elasticsearch.index.shard.recovery.RecoverySource;
-import org.elasticsearch.index.shard.recovery.RecoveryTarget;
-import org.elasticsearch.index.shard.recovery.StartRecoveryRequest;
 import org.elasticsearch.index.shard.service.IndexShard;
 import org.elasticsearch.index.shard.service.InternalIndexShard;
 import org.elasticsearch.indices.IndicesService;
+import org.elasticsearch.indices.recovery.RecoveryFailedException;
+import org.elasticsearch.indices.recovery.RecoveryTarget;
+import org.elasticsearch.indices.recovery.StartRecoveryRequest;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.util.List;
@@ -87,8 +86,6 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
     private final ClusterService clusterService;
 
     private final ThreadPool threadPool;
-
-    private final RecoverySource recoverySource;
 
     private final RecoveryTarget recoveryTarget;
 
@@ -113,7 +110,7 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
     private final FailedEngineHandler failedEngineHandler = new FailedEngineHandler();
 
     @Inject public IndicesClusterStateService(Settings settings, IndicesService indicesService, ClusterService clusterService,
-                                              ThreadPool threadPool, RecoveryTarget recoveryTarget, RecoverySource recoverySource,
+                                              ThreadPool threadPool, RecoveryTarget recoveryTarget,
                                               ShardStateAction shardStateAction,
                                               NodeIndexCreatedAction nodeIndexCreatedAction, NodeIndexDeletedAction nodeIndexDeletedAction,
                                               NodeMappingCreatedAction nodeMappingCreatedAction, NodeMappingRefreshAction nodeMappingRefreshAction,
@@ -122,7 +119,6 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
         this.indicesService = indicesService;
         this.clusterService = clusterService;
         this.threadPool = threadPool;
-        this.recoverySource = recoverySource;
         this.recoveryTarget = recoveryTarget;
         this.shardStateAction = shardStateAction;
         this.nodeIndexCreatedAction = nodeIndexCreatedAction;
@@ -141,7 +137,6 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
     }
 
     @Override protected void doClose() throws ElasticSearchException {
-        recoverySource.close();
     }
 
     @Override public void clusterChanged(final ClusterChangedEvent event) {
@@ -180,6 +175,24 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
             applyDeletedShards(event);
             applyCleanedIndices(event);
             applySettings(event);
+            sendIndexLifecycleEvents(event);
+        }
+    }
+
+    private void sendIndexLifecycleEvents(final ClusterChangedEvent event) {
+        for (String index : event.indicesCreated()) {
+            try {
+                nodeIndexCreatedAction.nodeIndexCreated(index, event.state().nodes().localNodeId());
+            } catch (Exception e) {
+                logger.debug("failed to send to master index {} created event", index);
+            }
+        }
+        for (String index : event.indicesDeleted()) {
+            try {
+                nodeIndexDeletedAction.nodeIndexDeleted(index, event.state().nodes().localNodeId());
+            } catch (Exception e) {
+                logger.debug("failed to send to master index {} deleted event", index);
+            }
         }
     }
 
@@ -223,11 +236,6 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
                 }
                 try {
                     indicesService.deleteIndex(index, "deleting index");
-                    threadPool.cached().execute(new Runnable() {
-                        @Override public void run() {
-                            nodeIndexDeletedAction.nodeIndexDeleted(index, event.state().nodes().localNodeId());
-                        }
-                    });
                 } catch (Exception e) {
                     logger.warn("failed to delete index", e);
                 }
@@ -268,10 +276,12 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
                             }
                             indexService.removeShard(existingShardId, "removing shard (index is closed)");
                         } else {
+                            // we can just remove the shard, without cleaning it locally, since we will clean it
+                            // when all shards are allocated in the IndicesStore
                             if (logger.isDebugEnabled()) {
-                                logger.debug("[{}][{}] cleaning shard locally (not allocated)", index, existingShardId);
+                                logger.debug("[{}][{}] removing shard (not allocated)", index, existingShardId);
                             }
-                            indexService.cleanShard(existingShardId, "cleaning shard locally (not allocated)");
+                            indexService.removeShard(existingShardId, "removing shard (not allocated)");
                         }
                     }
                 }
@@ -292,11 +302,6 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
                     logger.debug("[{}] creating index", indexMetaData.index());
                 }
                 indicesService.createIndex(indexMetaData.index(), indexMetaData.settings(), event.state().nodes().localNode().id());
-                threadPool.cached().execute(new Runnable() {
-                    @Override public void run() {
-                        nodeIndexCreatedAction.nodeIndexCreated(indexMetaData.index(), event.state().nodes().localNodeId());
-                    }
-                });
             }
         }
     }
@@ -492,12 +497,12 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
             }
 
             if (shardRouting.initializing()) {
-                applyInitializingShard(routingTable, nodes, shardRouting);
+                applyInitializingShard(routingTable, nodes, routingTable.index(shardRouting.index()).shard(shardRouting.id()), shardRouting);
             }
         }
     }
 
-    private void applyInitializingShard(final RoutingTable routingTable, final DiscoveryNodes nodes, final ShardRouting shardRouting) throws ElasticSearchException {
+    private void applyInitializingShard(final RoutingTable routingTable, final DiscoveryNodes nodes, final IndexShardRoutingTable indexShardRouting, final ShardRouting shardRouting) throws ElasticSearchException {
         final IndexService indexService = indicesService.indexServiceSafe(shardRouting.index());
         final int shardId = shardRouting.id();
 
@@ -582,8 +587,10 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent<Indic
         } else {
             if (shardRouting.relocatingNodeId() == null) {
                 // we are the first primary, recover from the gateway
+                // if its post api allocation, the index should exists
+                boolean indexShouldExists = indexShardRouting.allocatedPostApi();
                 IndexShardGatewayService shardGatewayService = indexService.shardInjector(shardId).getInstance(IndexShardGatewayService.class);
-                shardGatewayService.recover(new IndexShardGatewayService.RecoveryListener() {
+                shardGatewayService.recover(indexShouldExists, new IndexShardGatewayService.RecoveryListener() {
                     @Override public void onRecoveryDone() {
                         shardStateAction.shardStarted(shardRouting, "after recovery from gateway");
                     }

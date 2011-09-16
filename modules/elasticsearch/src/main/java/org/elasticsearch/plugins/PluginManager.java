@@ -9,6 +9,10 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.node.internal.InternalSettingsPerparer;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -31,6 +35,31 @@ public class PluginManager {
     public PluginManager(Environment environment, String url) {
         this.environment = environment;
         this.url = url;
+
+        TrustManager[] trustAllCerts = new TrustManager[]{
+                new X509TrustManager() {
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                        return null;
+                    }
+
+                    public void checkClientTrusted(
+                            java.security.cert.X509Certificate[] certs, String authType) {
+                    }
+
+                    public void checkServerTrusted(
+                            java.security.cert.X509Certificate[] certs, String authType) {
+                    }
+                }
+        };
+
+        // Install the all-trusting trust manager
+        try {
+            SSLContext sc = SSLContext.getInstance("SSL");
+            sc.init(null, trustAllCerts, new java.security.SecureRandom());
+            HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     public void downloadAndExtract(String name) throws IOException {
@@ -78,21 +107,21 @@ public class PluginManager {
                         pluginFile = new File(environment.pluginsFile(), name + ".zip");
                         if (version == null) {
                             // try with ES version from downloads
-                            URL pluginUrl = new URL("http://github.com/downloads/" + userName + "/" + repoName + "/" + repoName + "-" + Version.number() + ".zip");
+                            URL pluginUrl = new URL("https://github.com/downloads/" + userName + "/" + repoName + "/" + repoName + "-" + Version.number() + ".zip");
                             System.out.println("Trying " + pluginUrl.toExternalForm() + "...");
                             try {
                                 downloadHelper.download(pluginUrl, pluginFile, new HttpDownloadHelper.VerboseProgress(System.out));
                                 downloaded = true;
                             } catch (IOException e) {
                                 // try a tag with ES version
-                                pluginUrl = new URL("http://github.com/" + userName + "/" + repoName + "/zipball/v" + Version.number());
+                                pluginUrl = new URL("https://github.com/" + userName + "/" + repoName + "/zipball/v" + Version.number());
                                 System.out.println("Trying " + pluginUrl.toExternalForm() + "...");
                                 try {
                                     downloadHelper.download(pluginUrl, pluginFile, new HttpDownloadHelper.VerboseProgress(System.out));
                                     downloaded = true;
                                 } catch (IOException e1) {
                                     // download master
-                                    pluginUrl = new URL("http://github.com/" + userName + "/" + repoName + "/zipball/master");
+                                    pluginUrl = new URL("https://github.com/" + userName + "/" + repoName + "/zipball/master");
                                     System.out.println("Trying " + pluginUrl.toExternalForm() + "...");
                                     try {
                                         downloadHelper.download(pluginUrl, pluginFile, new HttpDownloadHelper.VerboseProgress(System.out));
@@ -104,14 +133,14 @@ public class PluginManager {
                             }
                         } else {
                             // download explicit version
-                            URL pluginUrl = new URL("http://github.com/downloads/" + userName + "/" + repoName + "/" + repoName + "-" + version + ".zip");
+                            URL pluginUrl = new URL("https://github.com/downloads/" + userName + "/" + repoName + "/" + repoName + "-" + version + ".zip");
                             System.out.println("Trying " + pluginUrl.toExternalForm() + "...");
                             try {
                                 downloadHelper.download(pluginUrl, pluginFile, new HttpDownloadHelper.VerboseProgress(System.out));
                                 downloaded = true;
                             } catch (IOException e) {
                                 // try a tag with ES version
-                                pluginUrl = new URL("http://github.com/" + userName + "/" + repoName + "/zipball/v" + version);
+                                pluginUrl = new URL("https://github.com/" + userName + "/" + repoName + "/zipball/v" + version);
                                 System.out.println("Trying " + pluginUrl.toExternalForm() + "...");
                                 try {
                                     downloadHelper.download(pluginUrl, pluginFile, new HttpDownloadHelper.VerboseProgress(System.out));
@@ -163,7 +192,7 @@ public class PluginManager {
                     }
                 }
                 File target = new File(extractLocation, zipName);
-                target.getParentFile().mkdirs();
+                FileSystemUtils.mkdirs(target.getParentFile());
                 Streams.copy(zipFile.getInputStream(zipEntry), new FileOutputStream(target));
             }
         } catch (Exception e) {
@@ -187,7 +216,7 @@ public class PluginManager {
                 File site = new File(extractLocation, "_site");
                 File tmpLocation = new File(environment.pluginsFile(), name + ".tmp");
                 extractLocation.renameTo(tmpLocation);
-                extractLocation.mkdirs();
+                FileSystemUtils.mkdirs(extractLocation);
                 tmpLocation.renameTo(site);
             }
         }
@@ -210,7 +239,7 @@ public class PluginManager {
         Tuple<Settings, Environment> initialSettings = InternalSettingsPerparer.prepareSettings(EMPTY_SETTINGS, true);
 
         if (!initialSettings.v2().pluginsFile().exists()) {
-            initialSettings.v2().pluginsFile().mkdirs();
+            FileSystemUtils.mkdirs(initialSettings.v2().pluginsFile());
         }
 
         String url = null;

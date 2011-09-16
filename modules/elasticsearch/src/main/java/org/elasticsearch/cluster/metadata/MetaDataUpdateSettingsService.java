@@ -26,6 +26,8 @@ import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateListener;
 import org.elasticsearch.cluster.ProcessedClusterStateUpdateTask;
 import org.elasticsearch.cluster.routing.RoutingTable;
+import org.elasticsearch.cluster.routing.allocation.AllocationService;
+import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
 import org.elasticsearch.common.Booleans;
 import org.elasticsearch.common.collect.Sets;
 import org.elasticsearch.common.component.AbstractComponent;
@@ -36,6 +38,8 @@ import org.elasticsearch.common.settings.Settings;
 import java.util.Map;
 import java.util.Set;
 
+import static org.elasticsearch.cluster.ClusterState.*;
+
 /**
  * @author kimchy (shay.banon)
  */
@@ -43,10 +47,13 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
 
     private final ClusterService clusterService;
 
-    @Inject public MetaDataUpdateSettingsService(Settings settings, ClusterService clusterService) {
+    private final AllocationService allocationService;
+
+    @Inject public MetaDataUpdateSettingsService(Settings settings, ClusterService clusterService, AllocationService allocationService) {
         super(settings);
         this.clusterService = clusterService;
         this.clusterService.add(this);
+        this.allocationService = allocationService;
     }
 
     @Override public void clusterChanged(ClusterChangedEvent event) {
@@ -54,13 +61,11 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
         if (!event.state().nodes().localNodeMaster()) {
             return;
         }
-        // TODO we only need to do that on first create of an index, or the number of nodes changed
+        // we need to do this each time in case it was changed by update settings
         for (final IndexMetaData indexMetaData : event.state().metaData()) {
             String autoExpandReplicas = indexMetaData.settings().get(IndexMetaData.SETTING_AUTO_EXPAND_REPLICAS);
             if (autoExpandReplicas != null && Booleans.parseBoolean(autoExpandReplicas, true)) { // Booleans only work for false values, just as we want it here
                 try {
-                    final int numberOfReplicas = event.state().nodes().dataNodes().size() - 1;
-
                     int min;
                     int max;
                     try {
@@ -76,20 +81,28 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
                         continue;
                     }
 
+                    int numberOfReplicas = event.state().nodes().dataNodes().size() - 1;
+                    if (numberOfReplicas < min) {
+                        numberOfReplicas = min;
+                    } else if (numberOfReplicas > max) {
+                        numberOfReplicas = max;
+                    }
+
                     // same value, nothing to do there
                     if (numberOfReplicas == indexMetaData.numberOfReplicas()) {
                         continue;
                     }
 
                     if (numberOfReplicas >= min && numberOfReplicas <= max) {
-                        Settings settings = ImmutableSettings.settingsBuilder().put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, numberOfReplicas).build();
+                        final int fNumberOfReplicas = numberOfReplicas;
+                        Settings settings = ImmutableSettings.settingsBuilder().put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, fNumberOfReplicas).build();
                         updateSettings(settings, new String[]{indexMetaData.index()}, new Listener() {
                             @Override public void onSuccess() {
-                                logger.info("[{}] auto expanded replicas to [{}]", indexMetaData.index(), numberOfReplicas);
+                                logger.info("[{}] auto expanded replicas to [{}]", indexMetaData.index(), fNumberOfReplicas);
                             }
 
                             @Override public void onFailure(Throwable t) {
-                                logger.warn("[{}] fail to auto expand replicas to [{}]", indexMetaData.index(), numberOfReplicas);
+                                logger.warn("[{}] fail to auto expand replicas to [{}]", indexMetaData.index(), fNumberOfReplicas);
                             }
                         });
                     }
@@ -124,7 +137,7 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
 
         final Set<String> removedSettings = Sets.newHashSet();
         for (String key : updatedSettingsBuilder.internalMap().keySet()) {
-            if (!IndexMetaData.dynamicSettings().contains(key)) {
+            if (!IndexMetaData.hasDynamicSetting(key)) {
                 removedSettings.add(key);
             }
         }
@@ -175,7 +188,13 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
                     }
 
 
-                    return ClusterState.builder().state(currentState).metaData(metaDataBuilder).routingTable(routingTableBuilder).build();
+                    ClusterState updatedState = ClusterState.builder().state(currentState).metaData(metaDataBuilder).routingTable(routingTableBuilder).build();
+
+                    // now, reroute in case things change that require it (like number of replicas)
+                    RoutingAllocation.Result routingResult = allocationService.reroute(updatedState);
+                    updatedState = newClusterStateBuilder().state(updatedState).routingResult(routingResult).build();
+
+                    return updatedState;
                 } catch (Exception e) {
                     listener.onFailure(e);
                     return currentState;

@@ -37,7 +37,8 @@ public class StoreModule extends AbstractModule {
     }
 
     @Override protected void configure() {
-        bind(Store.class).to(indexStore.shardStoreClass()).asEagerSingleton();
+        bind(DirectoryService.class).to(indexStore.shardDirectory()).asEagerSingleton();
         bind(StoreManagement.class).asEagerSingleton();
+        bind(Store.class).asEagerSingleton();
     }
 }

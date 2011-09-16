@@ -26,6 +26,7 @@ import org.elasticsearch.common.collect.MapEvictionListener;
 import org.elasticsearch.common.collect.MapMaker;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.lucene.docset.DocSet;
+import org.elasticsearch.common.metrics.CounterMetric;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.Index;
@@ -35,7 +36,6 @@ import org.elasticsearch.index.settings.IndexSettingsService;
 
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A soft reference based filter cache that has soft keys on the <tt>IndexReader</tt>.
@@ -49,7 +49,7 @@ public class SoftFilterCache extends AbstractConcurrentMapFilterCache implements
     private volatile int maxSize;
     private volatile TimeValue expire;
 
-    private final AtomicLong evictions = new AtomicLong();
+    private final CounterMetric evictions = new CounterMetric();
 
     private final ApplySettings applySettings = new ApplySettings();
 
@@ -68,7 +68,7 @@ public class SoftFilterCache extends AbstractConcurrentMapFilterCache implements
         super.close();
     }
 
-    @Override protected ConcurrentMap<Filter, DocSet> buildFilterMap() {
+    @Override protected ConcurrentMap<Object, DocSet> buildFilterMap() {
         // DocSet are not really stored with strong reference only when searching on them...
         // Filter might be stored in query cache
         MapMaker mapMaker = new MapMaker().softValues();
@@ -87,11 +87,11 @@ public class SoftFilterCache extends AbstractConcurrentMapFilterCache implements
     }
 
     @Override public long evictions() {
-        return evictions.get();
+        return evictions.count();
     }
 
     @Override public void onEviction(Filter filter, DocSet docSet) {
-        evictions.incrementAndGet();
+        evictions.inc();
     }
 
     static {

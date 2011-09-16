@@ -23,6 +23,7 @@ import org.apache.lucene.search.Filter;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.index.cache.filter.support.CacheKeyFilter;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.geo.GeoPointFieldDataType;
@@ -30,6 +31,7 @@ import org.elasticsearch.index.mapper.geo.GeoPointFieldMapper;
 import org.elasticsearch.index.search.geo.GeoDistance;
 import org.elasticsearch.index.search.geo.GeoDistanceFilter;
 import org.elasticsearch.index.search.geo.GeoHashUtils;
+import org.elasticsearch.index.search.geo.GeoUtils;
 
 import java.io.IOException;
 
@@ -62,6 +64,7 @@ public class GeoDistanceFilterParser implements FilterParser {
         XContentParser.Token token;
 
         boolean cache = false;
+        CacheKeyFilter.Key cacheKey = null;
         String filterName = null;
         String currentFieldName = null;
         double lat = 0;
@@ -71,6 +74,9 @@ public class GeoDistanceFilterParser implements FilterParser {
         Object vDistance = null;
         DistanceUnit unit = DistanceUnit.KILOMETERS; // default unit
         GeoDistance geoDistance = GeoDistance.ARC;
+        String optimizeBbox = "memory";
+        boolean normalizeLon = true;
+        boolean normalizeLat = true;
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
@@ -128,6 +134,13 @@ public class GeoDistanceFilterParser implements FilterParser {
                     filterName = parser.text();
                 } else if ("_cache".equals(currentFieldName)) {
                     cache = parser.booleanValue();
+                } else if ("_cache_key".equals(currentFieldName) || "_cacheKey".equals(currentFieldName)) {
+                    cacheKey = new CacheKeyFilter.Key(parser.text());
+                } else if ("optimize_bbox".equals(currentFieldName) || "optimizeBbox".equals(currentFieldName)) {
+                    optimizeBbox = parser.textOrNull();
+                } else if ("normalize".equals(currentFieldName)) {
+                    normalizeLat = parser.booleanValue();
+                    normalizeLon = parser.booleanValue();
                 } else {
                     // assume the value is the actual value
                     String value = parser.text();
@@ -150,6 +163,14 @@ public class GeoDistanceFilterParser implements FilterParser {
         } else {
             distance = DistanceUnit.parse((String) vDistance, unit, DistanceUnit.MILES);
         }
+        distance = geoDistance.normalize(distance, DistanceUnit.MILES);
+
+        if (normalizeLat) {
+            lat = GeoUtils.normalizeLat(lat);
+        }
+        if (normalizeLon) {
+            lon = GeoUtils.normalizeLon(lon);
+        }
 
         MapperService mapperService = parseContext.mapperService();
         FieldMapper mapper = mapperService.smartNameFieldMapper(fieldName);
@@ -159,11 +180,12 @@ public class GeoDistanceFilterParser implements FilterParser {
         if (mapper.fieldDataType() != GeoPointFieldDataType.TYPE) {
             throw new QueryParsingException(parseContext.index(), "field [" + fieldName + "] is not a geo_point field");
         }
+        GeoPointFieldMapper geoMapper = ((GeoPointFieldMapper.GeoStringFieldMapper) mapper).geoMapper();
         fieldName = mapper.names().indexName();
 
-        Filter filter = new GeoDistanceFilter(lat, lon, distance, geoDistance, fieldName, parseContext.indexCache().fieldData());
+        Filter filter = new GeoDistanceFilter(lat, lon, distance, geoDistance, fieldName, geoMapper, parseContext.indexCache().fieldData(), optimizeBbox);
         if (cache) {
-            filter = parseContext.cacheFilter(filter);
+            filter = parseContext.cacheFilter(filter, cacheKey);
         }
         filter = wrapSmartNameFilter(filter, parseContext.smartFieldMappers(fieldName), parseContext);
         if (filterName != null) {

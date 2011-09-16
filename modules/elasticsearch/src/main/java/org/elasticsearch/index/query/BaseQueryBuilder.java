@@ -31,6 +31,17 @@ import java.io.IOException;
  */
 public abstract class BaseQueryBuilder implements QueryBuilder {
 
+    @Override public String toString() {
+        try {
+            XContentBuilder builder = XContentFactory.jsonBuilder();
+            builder.prettyPrint();
+            toXContent(builder, EMPTY_PARAMS);
+            return builder.string();
+        } catch (Exception e) {
+            throw new QueryBuilderException("Failed to build query", e);
+        }
+    }
+
     @Override public BytesStream buildAsUnsafeBytes() throws QueryBuilderException {
         return buildAsUnsafeBytes(XContentType.JSON);
     }
@@ -39,7 +50,7 @@ public abstract class BaseQueryBuilder implements QueryBuilder {
         try {
             XContentBuilder builder = XContentFactory.contentBuilder(contentType);
             toXContent(builder, EMPTY_PARAMS);
-            return builder.unsafeStream();
+            return builder.underlyingStream();
         } catch (Exception e) {
             throw new QueryBuilderException("Failed to build query", e);
         }

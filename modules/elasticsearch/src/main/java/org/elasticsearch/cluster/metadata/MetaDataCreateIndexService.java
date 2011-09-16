@@ -27,11 +27,9 @@ import org.elasticsearch.cluster.action.index.NodeIndexCreatedAction;
 import org.elasticsearch.cluster.block.ClusterBlock;
 import org.elasticsearch.cluster.block.ClusterBlocks;
 import org.elasticsearch.cluster.routing.IndexRoutingTable;
-import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.RoutingTable;
-import org.elasticsearch.cluster.routing.ShardRouting;
+import org.elasticsearch.cluster.routing.allocation.AllocationService;
 import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
-import org.elasticsearch.cluster.routing.allocation.ShardsAllocation;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.collect.ImmutableList;
 import org.elasticsearch.common.collect.Lists;
@@ -63,7 +61,11 @@ import org.elasticsearch.threadpool.ThreadPool;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
-import java.util.*;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -86,21 +88,24 @@ public class MetaDataCreateIndexService extends AbstractComponent {
 
     private final IndicesService indicesService;
 
-    private final ShardsAllocation shardsAllocation;
+    private final AllocationService allocationService;
 
     private final NodeIndexCreatedAction nodeIndexCreatedAction;
+
+    private final MetaDataService metaDataService;
 
     private final String riverIndexName;
 
     @Inject public MetaDataCreateIndexService(Settings settings, Environment environment, ThreadPool threadPool, ClusterService clusterService, IndicesService indicesService,
-                                              ShardsAllocation shardsAllocation, NodeIndexCreatedAction nodeIndexCreatedAction, @RiverIndexName String riverIndexName) {
+                                              AllocationService allocationService, NodeIndexCreatedAction nodeIndexCreatedAction, MetaDataService metaDataService, @RiverIndexName String riverIndexName) {
         super(settings);
         this.environment = environment;
         this.threadPool = threadPool;
         this.clusterService = clusterService;
         this.indicesService = indicesService;
-        this.shardsAllocation = shardsAllocation;
+        this.allocationService = allocationService;
         this.nodeIndexCreatedAction = nodeIndexCreatedAction;
+        this.metaDataService = metaDataService;
         this.riverIndexName = riverIndexName;
     }
 
@@ -114,12 +119,20 @@ public class MetaDataCreateIndexService extends AbstractComponent {
             }
         }
         request.settings(updatedSettingsBuilder.build());
-        final CreateIndexListener listener = new CreateIndexListener(request, userListener);
 
+        // we lock here, and not within the cluster service callback since we don't want to
+        // block the whole cluster state handling
+        MetaDataService.MdLock mdLock = metaDataService.indexMetaDataLock(request.index);
+        try {
+            mdLock.lock();
+        } catch (InterruptedException e) {
+            userListener.onFailure(e);
+            return;
+        }
+
+        final CreateIndexListener listener = new CreateIndexListener(mdLock, request, userListener);
 
         clusterService.submitStateUpdateTask("create-index [" + request.index + "], cause [" + request.cause + "]", new ProcessedClusterStateUpdateTask() {
-            final Set<String> allocatedNodes = Sets.newHashSet();
-
             @Override public ClusterState execute(ClusterState currentState) {
                 try {
                     try {
@@ -267,47 +280,32 @@ public class MetaDataCreateIndexService extends AbstractComponent {
                         IndexRoutingTable.Builder indexRoutingBuilder = new IndexRoutingTable.Builder(request.index)
                                 .initializeEmpty(updatedState.metaData().index(request.index), true);
                         routingTableBuilder.add(indexRoutingBuilder);
-                        RoutingAllocation.Result routingResult = shardsAllocation.reroute(newClusterStateBuilder().state(updatedState).routingTable(routingTableBuilder).build());
+                        RoutingAllocation.Result routingResult = allocationService.reroute(newClusterStateBuilder().state(updatedState).routingTable(routingTableBuilder).build());
                         updatedState = newClusterStateBuilder().state(updatedState).routingResult(routingResult).build();
                     }
 
-                    // initialize the counter only for nodes the shards are allocated to
-                    if (updatedState.routingTable().hasIndex(request.index)) {
-                        for (IndexShardRoutingTable indexShardRoutingTable : updatedState.routingTable().index(request.index)) {
-                            for (ShardRouting shardRouting : indexShardRoutingTable) {
-                                // if we have a routing for this shard on a node, and its not the master node (since we already created
-                                // an index on it), then add it
-                                if (shardRouting.currentNodeId() != null && !updatedState.nodes().localNodeId().equals(shardRouting.currentNodeId())) {
-                                    allocatedNodes.add(shardRouting.currentNodeId());
+                    // we wait for events from all nodes that the index has been added to the metadata
+                    final AtomicInteger counter = new AtomicInteger(currentState.nodes().size());
+
+                    final NodeIndexCreatedAction.Listener nodeIndexCreatedListener = new NodeIndexCreatedAction.Listener() {
+                        @Override public void onNodeIndexCreated(String index, String nodeId) {
+                            if (index.equals(request.index)) {
+                                if (counter.decrementAndGet() == 0) {
+                                    listener.onResponse(new Response(true, indexMetaData));
+                                    nodeIndexCreatedAction.remove(this);
                                 }
                             }
                         }
-                    }
+                    };
 
-                    if (!allocatedNodes.isEmpty()) {
-                        final AtomicInteger counter = new AtomicInteger(allocatedNodes.size());
+                    nodeIndexCreatedAction.add(nodeIndexCreatedListener);
 
-                        final NodeIndexCreatedAction.Listener nodeIndexCreatedListener = new NodeIndexCreatedAction.Listener() {
-                            @Override public void onNodeIndexCreated(String index, String nodeId) {
-                                if (index.equals(request.index)) {
-                                    if (counter.decrementAndGet() == 0) {
-                                        listener.onResponse(new Response(true, indexMetaData));
-                                        nodeIndexCreatedAction.remove(this);
-                                    }
-                                }
-                            }
-                        };
-
-                        nodeIndexCreatedAction.add(nodeIndexCreatedListener);
-
-                        listener.future = threadPool.schedule(request.timeout, ThreadPool.Names.SAME, new Runnable() {
-                            @Override public void run() {
-                                listener.onResponse(new Response(false, indexMetaData));
-                                nodeIndexCreatedAction.remove(nodeIndexCreatedListener);
-                            }
-                        });
-                    }
-
+                    listener.future = threadPool.schedule(request.timeout, ThreadPool.Names.SAME, new Runnable() {
+                        @Override public void run() {
+                            listener.onResponse(new Response(false, indexMetaData));
+                            nodeIndexCreatedAction.remove(nodeIndexCreatedListener);
+                        }
+                    });
 
                     return updatedState;
                 } catch (Exception e) {
@@ -318,16 +316,15 @@ public class MetaDataCreateIndexService extends AbstractComponent {
             }
 
             @Override public void clusterStateProcessed(ClusterState clusterState) {
-                if (allocatedNodes.isEmpty()) {
-                    listener.onResponse(new Response(true, clusterState.metaData().index(request.index)));
-                }
             }
         });
     }
 
     class CreateIndexListener implements Listener {
 
-        private AtomicBoolean notified = new AtomicBoolean();
+        private final AtomicBoolean notified = new AtomicBoolean();
+
+        private final MetaDataService.MdLock mdLock;
 
         private final Request request;
 
@@ -335,13 +332,15 @@ public class MetaDataCreateIndexService extends AbstractComponent {
 
         volatile ScheduledFuture future;
 
-        private CreateIndexListener(Request request, Listener listener) {
+        private CreateIndexListener(MetaDataService.MdLock mdLock, Request request, Listener listener) {
+            this.mdLock = mdLock;
             this.request = request;
             this.listener = listener;
         }
 
         @Override public void onResponse(final Response response) {
             if (notified.compareAndSet(false, true)) {
+                mdLock.unlock();
                 if (future != null) {
                     future.cancel(false);
                 }
@@ -351,6 +350,7 @@ public class MetaDataCreateIndexService extends AbstractComponent {
 
         @Override public void onFailure(Throwable t) {
             if (notified.compareAndSet(false, true)) {
+                mdLock.unlock();
                 if (future != null) {
                     future.cancel(false);
                 }

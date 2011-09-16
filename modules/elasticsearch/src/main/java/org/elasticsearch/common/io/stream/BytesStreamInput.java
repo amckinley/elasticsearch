@@ -38,10 +38,21 @@ public class BytesStreamInput extends StreamInput {
         this(buf, 0, buf.length);
     }
 
-    public BytesStreamInput(byte buf[], int position, int count) {
+    public BytesStreamInput(byte buf[], int offset, int length) {
         this.buf = buf;
-        this.pos = position;
-        this.count = count;
+        this.pos = offset;
+        this.count = Math.min(offset + length, buf.length);
+    }
+
+    @Override public long skip(long n) throws IOException {
+        if (pos + n > count) {
+            n = count - pos;
+        }
+        if (n < 0) {
+            return 0;
+        }
+        pos += n;
+        return n;
     }
 
     public int position() {

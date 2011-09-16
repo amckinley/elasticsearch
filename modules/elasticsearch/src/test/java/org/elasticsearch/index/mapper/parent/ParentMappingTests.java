@@ -35,6 +35,23 @@ import static org.hamcrest.Matchers.*;
  */
 public class ParentMappingTests {
 
+    @Test public void parentNotMapped() throws Exception {
+        String mapping = XContentFactory.jsonBuilder().startObject().startObject("type")
+                .endObject().endObject().string();
+        DocumentMapper docMapper = MapperTests.newParser().parse(mapping);
+
+        ParsedDocument doc = docMapper.parse(SourceToParse.source(XContentFactory.jsonBuilder()
+                .startObject()
+                .field("_parent", "1122")
+                .field("x_field", "x_value")
+                .endObject()
+                .copiedBytes()).type("type").id("1"));
+
+        // no _parent mapping, used as a simple field
+        assertThat(doc.parent(), equalTo(null));
+        assertThat(doc.rootDoc().get("_parent"), equalTo("1122"));
+    }
+
     @Test public void parentSetInDocNotExternally() throws Exception {
         String mapping = XContentFactory.jsonBuilder().startObject().startObject("type")
                 .startObject("_parent").field("type", "p_type").endObject()
@@ -47,8 +64,9 @@ public class ParentMappingTests {
                 .field("x_field", "x_value")
                 .endObject()
                 .copiedBytes()).type("type").id("1"));
-
-        assertThat(doc.masterDoc().get("_parent"), equalTo(Uid.createUid("p_type", "1122")));
+        
+        assertThat(doc.parent(), equalTo("1122"));
+        assertThat(doc.rootDoc().get("_parent"), equalTo(Uid.createUid("p_type", "1122")));
     }
 
     @Test public void parentNotSetInDocSetExternally() throws Exception {
@@ -63,7 +81,7 @@ public class ParentMappingTests {
                 .endObject()
                 .copiedBytes()).type("type").id("1").parent("1122"));
 
-        assertThat(doc.masterDoc().get("_parent"), equalTo(Uid.createUid("p_type", "1122")));
+        assertThat(doc.rootDoc().get("_parent"), equalTo(Uid.createUid("p_type", "1122")));
     }
 
     @Test public void parentSetInDocSetExternally() throws Exception {
@@ -79,6 +97,6 @@ public class ParentMappingTests {
                 .endObject()
                 .copiedBytes()).type("type").id("1").parent("1122"));
 
-        assertThat(doc.masterDoc().get("_parent"), equalTo(Uid.createUid("p_type", "1122")));
+        assertThat(doc.rootDoc().get("_parent"), equalTo(Uid.createUid("p_type", "1122")));
     }
 }

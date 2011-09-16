@@ -33,7 +33,6 @@ import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.util.UnicodeUtil;
 import org.elasticsearch.ElasticSearchException;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.BytesHolder;
 import org.elasticsearch.common.Preconditions;
 import org.elasticsearch.common.Unicode;
 import org.elasticsearch.common.bloom.BloomFilter;
@@ -79,7 +78,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -103,7 +101,7 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
 
     private final AtomicBoolean optimizeMutex = new AtomicBoolean();
 
-    private final long gcDeletesInMillis;
+    private long gcDeletesInMillis;
 
     private final ThreadPool threadPool;
 
@@ -146,8 +144,6 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
     private volatile int disableFlushCounter = 0;
 
     // indexing searcher is initialized
-    private final AtomicReference<Searcher> indexingSearcher = new AtomicReference<Searcher>();
-
     private final AtomicBoolean flushing = new AtomicBoolean();
 
     private final ConcurrentMap<String, VersionValue> versionMap;
@@ -266,10 +262,6 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                 }
                 translog.newTranslog(translogIdGenerator.get());
                 this.nrtResource = buildNrtResource(indexWriter);
-                if (indexingSearcher.get() != null) {
-                    indexingSearcher.set(null);
-                    indexingSearcher.get().release();
-                }
                 SegmentInfos infos = new SegmentInfos();
                 infos.read(store.directory());
                 lastCommittedSegmentInfos = infos;
@@ -305,10 +297,13 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                     if (versionValue.delete()) {
                         return GetResult.NOT_EXISTS;
                     }
+                    if (!get.loadSource()) {
+                        return new GetResult(true, versionValue.version(), null);
+                    }
                     byte[] data = translog.read(versionValue.translogLocation());
                     if (data != null) {
                         try {
-                            BytesHolder source = TranslogStreams.readSource(data);
+                            Translog.Source source = TranslogStreams.readSource(data);
                             return new GetResult(true, versionValue.version(), source);
                         } catch (IOException e) {
                             // switched on us, read it from the reader
@@ -337,7 +332,7 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                 //TODO: A better exception goes here
                 throw new EngineException(shardId(), "failed to load document", e);
             }
-
+            searcher.release();
             return GetResult.NOT_EXISTS;
         } finally {
             rwl.readLock().unlock();
@@ -800,10 +795,10 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                         // that's ok if the index writer failed and is in inconsistent state
                         // we will get an exception on a dirty operation, and will cause the shard
                         // to be allocated to a different node
-                        indexWriter.close();
+                        indexWriter.close(false);
                         indexWriter = createWriter();
 
-                        if (flushNeeded) {
+                        if (flushNeeded || flush.force()) {
                             flushNeeded = false;
                             long translogId = translogIdGenerator.incrementAndGet();
                             indexWriter.commit(MapBuilder.<String, String>newMapBuilder().put(Translog.TRANSLOG_ID_KEY, Long.toString(translogId)).map());
@@ -832,16 +827,30 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                         throw new FlushNotAllowedEngineException(shardId, "Recovery is in progress, flush is not allowed");
                     }
 
-                    if (flushNeeded) {
+                    if (flushNeeded || flush.force()) {
                         flushNeeded = false;
                         try {
                             long translogId = translogIdGenerator.incrementAndGet();
                             translog.newTransientTranslog(translogId);
                             indexWriter.commit(MapBuilder.<String, String>newMapBuilder().put(Translog.TRANSLOG_ID_KEY, Long.toString(translogId)).map());
-                            translog.makeTransientCurrent();
+                            if (flush.force()) {
+                                // if we force, we might not have committed, we need to check that its the same id
+                                Map<String, String> commitUserData = IndexReader.getCommitUserData(store.directory());
+                                long committedTranslogId = Long.parseLong(commitUserData.get(Translog.TRANSLOG_ID_KEY));
+                                if (committedTranslogId != translogId) {
+                                    // we did not commit anything, revert to the old translog
+                                    translog.revertTransient();
+                                } else {
+                                    translog.makeTransientCurrent();
+                                }
+                            } else {
+                                translog.makeTransientCurrent();
+                            }
                         } catch (Exception e) {
+                            translog.revertTransient();
                             throw new FlushFailedEngineException(shardId, e);
                         } catch (OutOfMemoryError e) {
+                            translog.revertTransient();
                             failEngine(e);
                             throw new FlushFailedEngineException(shardId, e);
                         }
@@ -866,10 +875,6 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
     private void refreshVersioningTable(long time) {
         // we need to refresh in order to clear older version values
         refresh(new Refresh(true).force(true));
-        Searcher searcher = indexingSearcher.get();
-        if (searcher != null) {
-            indexingSearcher.set(null);
-        }
         for (Map.Entry<String, VersionValue> entry : versionMap.entrySet()) {
             String id = entry.getKey();
             synchronized (dirtyLock(id)) { // can we do it without this lock on each value? maybe batch to a set and get the lock once per set?
@@ -888,9 +893,6 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                     versionMap.remove(id);
                 }
             }
-        }
-        if (searcher != null) {
-            searcher.release();
         }
     }
 
@@ -922,6 +924,9 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
     }
 
     @Override public void optimize(Optimize optimize) throws EngineException {
+        if (optimize.flush()) {
+            flush(new Flush().force(true));
+        }
         if (optimizeMutex.compareAndSet(false, true)) {
             rwl.readLock().lock();
             try {
@@ -945,10 +950,10 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
                 failEngine(e);
                 throw new OptimizeFailedEngineException(shardId, e);
             } finally {
+                rwl.readLock().unlock();
                 if (indexWriter != null && indexWriter.getConfig().getMergePolicy() instanceof EnableMergePolicy) {
                     ((EnableMergePolicy) indexWriter.getConfig().getMergePolicy()).disableMerge();
                 }
-                rwl.readLock().unlock();
                 optimizeMutex.set(false);
             }
         }
@@ -957,7 +962,7 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
             indexWriter.waitForMerges();
         }
         if (optimize.flush()) {
-            flush(new Flush());
+            flush(new Flush().force(true));
         }
         if (optimize.refresh()) {
             refresh(new Refresh(false).force(true));
@@ -1031,18 +1036,9 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
         }
 
         rwl.writeLock().lock();
-        Translog.Snapshot phase3Snapshot;
+        Translog.Snapshot phase3Snapshot = null;
         try {
             phase3Snapshot = translog.snapshot(phase2Snapshot);
-        } catch (Exception e) {
-            --disableFlushCounter;
-            rwl.writeLock().unlock();
-            phase1Snapshot.release();
-            phase2Snapshot.release();
-            throw new RecoveryEngineException(shardId, 3, "Snapshot failed", e);
-        }
-
-        try {
             recoveryHandler.phase3(phase3Snapshot);
         } catch (Exception e) {
             throw new RecoveryEngineException(shardId, 3, "Execution failed", e);
@@ -1051,7 +1047,9 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
             rwl.writeLock().unlock();
             phase1Snapshot.release();
             phase2Snapshot.release();
-            phase3Snapshot.release();
+            if (phase3Snapshot != null) {
+                phase3Snapshot.release();
+            }
         }
     }
 
@@ -1159,10 +1157,6 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
         this.versionMap.clear();
         this.failedEngineListeners.clear();
         try {
-            if (indexingSearcher.get() != null) {
-                indexingSearcher.get().release();
-                indexingSearcher.set(null);
-            }
             if (nrtResource != null) {
                 this.nrtResource.forceClose();
             }
@@ -1196,31 +1190,24 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
 
     private long loadCurrentVersionFromIndex(Term uid) {
         UnicodeUtil.UTF8Result utf8 = Unicode.fromStringAsUtf8(uid.text());
-        // no version, get the version from the index
-        Searcher searcher = indexingSearcher.get();
-        if (searcher == null) {
-            Searcher tmpSearcher = searcher();
-            if (!indexingSearcher.compareAndSet(null, tmpSearcher)) {
-                // someone beat us to it, release the one we got
-                tmpSearcher.release();
+        Searcher searcher = searcher();
+        try {
+            for (IndexReader reader : searcher.searcher().subReaders()) {
+                BloomFilter filter = bloomCache.filter(reader, UidFieldMapper.NAME, asyncLoadBloomFilter);
+                // we know that its not there...
+                if (!filter.isPresent(utf8.result, 0, utf8.length)) {
+                    continue;
+                }
+                long version = UidField.loadVersion(reader, uid);
+                // either -2 (its there, but no version associated), or an actual version
+                if (version != -1) {
+                    return version;
+                }
             }
-            // it must have a value, since someone set it already, and this code gets called
-            // under a readLock, while the indexSearcher gets nullified on a writeLock
-            searcher = indexingSearcher.get();
+            return -1;
+        } finally {
+            searcher.release();
         }
-        for (IndexReader reader : searcher.searcher().subReaders()) {
-            BloomFilter filter = bloomCache.filter(reader, UidFieldMapper.NAME, asyncLoadBloomFilter);
-            // we know that its not there...
-            if (!filter.isPresent(utf8.result, 0, utf8.length)) {
-                continue;
-            }
-            long version = UidField.loadVersion(reader, uid);
-            // either -2 (its there, but no version associated), or an actual version
-            if (version != -1) {
-                return version;
-            }
-        }
-        return -1;
     }
 
     private IndexWriter createWriter() throws IOException {
@@ -1255,13 +1242,20 @@ public class RobinEngine extends AbstractIndexShardComponent implements Engine {
         IndexMetaData.addDynamicSettings(
                 "index.term_index_interval",
                 "index.term_index_divisor",
-                "index.index_concurrency"
+                "index.index_concurrency",
+                "index.gc_deletes"
         );
     }
 
 
     class ApplySettings implements IndexSettingsService.Listener {
         @Override public void onRefreshSettings(Settings settings) {
+            long gcDeletesInMillis = indexSettings.getAsTime("index.gc_deletes", TimeValue.timeValueMillis(RobinEngine.this.gcDeletesInMillis)).millis();
+            if (gcDeletesInMillis != RobinEngine.this.gcDeletesInMillis) {
+                logger.info("updating index.gc_deletes from [{}] to [{}]", TimeValue.timeValueMillis(RobinEngine.this.gcDeletesInMillis), TimeValue.timeValueMillis(gcDeletesInMillis));
+                RobinEngine.this.gcDeletesInMillis = gcDeletesInMillis;
+            }
+
             int termIndexInterval = settings.getAsInt("index.term_index_interval", RobinEngine.this.termIndexInterval);
             int termIndexDivisor = settings.getAsInt("index.term_index_divisor", RobinEngine.this.termIndexDivisor); // IndexReader#DEFAULT_TERMS_INDEX_DIVISOR
             int indexConcurrency = settings.getAsInt("index.index_concurrency", RobinEngine.this.indexConcurrency);

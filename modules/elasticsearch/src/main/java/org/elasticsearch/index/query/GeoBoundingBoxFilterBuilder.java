@@ -20,7 +20,7 @@
 package org.elasticsearch.index.query;
 
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.index.search.geo.GeoBoundingBoxFilter;
+import org.elasticsearch.index.search.geo.Point;
 
 import java.io.IOException;
 
@@ -31,17 +31,20 @@ public class GeoBoundingBoxFilterBuilder extends BaseFilterBuilder {
 
     private final String name;
 
-    private GeoBoundingBoxFilter.Point topLeft;
+    private Point topLeft;
 
     private String topLeftGeohash;
 
-    private GeoBoundingBoxFilter.Point bottomRight;
+    private Point bottomRight;
 
     private String bottomRightGeohash;
 
     private Boolean cache;
+    private String cacheKey;
 
     private String filterName;
+
+    private String type;
 
     public GeoBoundingBoxFilterBuilder(String name) {
         this.name = name;
@@ -54,7 +57,7 @@ public class GeoBoundingBoxFilterBuilder extends BaseFilterBuilder {
      * @param lon The longitude
      */
     public GeoBoundingBoxFilterBuilder topLeft(double lat, double lon) {
-        topLeft = new GeoBoundingBoxFilter.Point();
+        topLeft = new Point();
         topLeft.lat = lat;
         topLeft.lon = lon;
         return this;
@@ -67,7 +70,7 @@ public class GeoBoundingBoxFilterBuilder extends BaseFilterBuilder {
      * @param lon The longitude
      */
     public GeoBoundingBoxFilterBuilder bottomRight(double lat, double lon) {
-        bottomRight = new GeoBoundingBoxFilter.Point();
+        bottomRight = new Point();
         bottomRight.lat = lat;
         bottomRight.lon = lon;
         return this;
@@ -99,6 +102,20 @@ public class GeoBoundingBoxFilterBuilder extends BaseFilterBuilder {
         return this;
     }
 
+    public GeoBoundingBoxFilterBuilder cacheKey(String cacheKey) {
+        this.cacheKey = cacheKey;
+        return this;
+    }
+
+    /**
+     * Sets the type of executing of the geo bounding box. Can be either `memory` or `indexed`. Defaults
+     * to `memory`.
+     */
+    public GeoBoundingBoxFilterBuilder type(String type) {
+        this.type = type;
+        return this;
+    }
+
     @Override protected void doXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject(GeoBoundingBoxFilterParser.NAME);
 
@@ -125,6 +142,12 @@ public class GeoBoundingBoxFilterBuilder extends BaseFilterBuilder {
         }
         if (cache != null) {
             builder.field("_cache", cache);
+        }
+        if (cacheKey != null) {
+            builder.field("_cache_key", cacheKey);
+        }
+        if (type != null) {
+            builder.field("type", type);
         }
 
         builder.endObject();

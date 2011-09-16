@@ -11,7 +11,7 @@ SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
 sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
 buildTimeStr = sdf.format(buildTime)
 
-versionNumber = '0.17.0-SNAPSHOT'
+versionNumber = '0.18.0-SNAPSHOT'
 
 explodedDistDir = new File(distsDir, 'exploded')
 explodedDistLibDir = new File(explodedDistDir, 'lib')
@@ -135,6 +135,15 @@ task explodedDist(dependsOn: [configurations.distLib], description: 'Builds a mi
     ant.delete { fileset(dir: explodedDistLibDir, includes: "slf4j-*.jar") } // no need for slf4j
     ant.delete { fileset(dir: explodedDistLibDir, includes: "jarjar-*.jar") } // no need jackson, we jarjar it
     ant.delete { fileset(dir: explodedDistLibDir, includes: "sigar-*.jar") } // no need sigar directly under lib...
+
+    // move relevant jars to ext
+    //    ant.move(todir: "$explodedDistLibDir/ext") {
+    //        fileset(dir: explodedDistLibDir) {
+    //            include(name: '*jline*')
+    //            include(name: '*log4j*')
+    //            include(name: '*jna*')
+    //        }
+    //    }
 
     ant.chmod(dir: "$explodedDistDir/bin", perm: "ugo+rx", includes: "**/*")
 }

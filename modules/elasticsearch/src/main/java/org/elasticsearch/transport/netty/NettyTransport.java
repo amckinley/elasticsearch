@@ -65,7 +65,6 @@ import org.elasticsearch.transport.Transport;
 import org.elasticsearch.transport.TransportException;
 import org.elasticsearch.transport.TransportRequestOptions;
 import org.elasticsearch.transport.TransportServiceAdapter;
-import org.elasticsearch.transport.TransportStats;
 import org.elasticsearch.transport.support.TransportStreams;
 
 import java.io.IOException;
@@ -183,9 +182,12 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         this.reuseAddress = componentSettings.getAsBoolean("reuse_address", settings.getAsBoolean(TCP_REUSE_ADDRESS, NetworkUtils.defaultReuseAddress()));
         this.tcpSendBufferSize = componentSettings.getAsBytesSize("tcp_send_buffer_size", settings.getAsBytesSize(TCP_SEND_BUFFER_SIZE, TCP_DEFAULT_SEND_BUFFER_SIZE));
         this.tcpReceiveBufferSize = componentSettings.getAsBytesSize("tcp_receive_buffer_size", settings.getAsBytesSize(TCP_RECEIVE_BUFFER_SIZE, TCP_DEFAULT_RECEIVE_BUFFER_SIZE));
-        this.connectionsPerNodeLow = componentSettings.getAsInt("connections_per_node.low", 2);
-        this.connectionsPerNodeMed = componentSettings.getAsInt("connections_per_node.med", 7);
-        this.connectionsPerNodeHigh = componentSettings.getAsInt("connections_per_node.high", 1);
+        this.connectionsPerNodeLow = componentSettings.getAsInt("connections_per_node.low", settings.getAsInt("transport.connections_per_node.low", 2));
+        this.connectionsPerNodeMed = componentSettings.getAsInt("connections_per_node.med", settings.getAsInt("transport.connections_per_node.med", 4));
+        this.connectionsPerNodeHigh = componentSettings.getAsInt("connections_per_node.high", settings.getAsInt("transport.connections_per_node.high", 1));
+
+        logger.debug("using worker_count[{}], port[{}], bind_host[{}], publish_host[{}], compress[{}], connect_timeout[{}], connections_per_node[{}/{}/{}]",
+                workerCount, port, bindHost, publishHost, compress, connectTimeout, connectionsPerNodeLow, connectionsPerNodeMed, connectionsPerNodeHigh);
     }
 
     public Settings settings() {
@@ -439,8 +441,9 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         return new InetSocketTransportAddress((InetSocketAddress) socketAddress);
     }
 
-    @Override public TransportStats stats() {
-        return new TransportStats(serverOpenChannels.numberOfOpenChannels());
+    @Override public long serverOpen() {
+        OpenChannelsHandler channels = serverOpenChannels;
+        return channels == null ? 0 : channels.numberOfOpenChannels();
     }
 
     @Override public <T extends Streamable> void sendRequest(final DiscoveryNode node, final long requestId, final String action, final Streamable message, TransportRequestOptions options) throws IOException, TransportException {
@@ -452,7 +455,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
 
         CachedStreamOutput.Entry cachedEntry = CachedStreamOutput.popEntry();
         TransportStreams.buildRequest(cachedEntry, requestId, action, message, options);
-        ChannelBuffer buffer = ChannelBuffers.wrappedBuffer(cachedEntry.bytes().unsafeByteArray(), 0, cachedEntry.bytes().size());
+        ChannelBuffer buffer = ChannelBuffers.wrappedBuffer(cachedEntry.bytes().underlyingBytes(), 0, cachedEntry.bytes().size());
         ChannelFuture future = targetChannel.write(buffer);
         future.addListener(new CacheFutureListener(cachedEntry));
         // We handle close connection exception in the #exceptionCaught method, which is the main reason we want to add this future
@@ -578,6 +581,28 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
                 }
                 nodeChannels.high[i] = connectHigh[i].getChannel();
                 nodeChannels.high[i].getCloseFuture().addListener(new ChannelCloseListener(node));
+            }
+
+            if (nodeChannels.low.length == 0) {
+                if (nodeChannels.med.length > 0) {
+                    nodeChannels.low = nodeChannels.med;
+                } else {
+                    nodeChannels.low = nodeChannels.high;
+                }
+            }
+            if (nodeChannels.med.length == 0) {
+                if (nodeChannels.high.length > 0) {
+                    nodeChannels.med = nodeChannels.high;
+                } else {
+                    nodeChannels.med = nodeChannels.low;
+                }
+            }
+            if (nodeChannels.high.length == 0) {
+                if (nodeChannels.med.length > 0) {
+                    nodeChannels.high = nodeChannels.med;
+                } else {
+                    nodeChannels.high = nodeChannels.low;
+                }
             }
         } catch (RuntimeException e) {
             // clean the futures

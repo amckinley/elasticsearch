@@ -24,39 +24,44 @@ import org.elasticsearch.common.concurrentlinkedhashmap.ConcurrentLinkedHashMap;
 import org.elasticsearch.common.concurrentlinkedhashmap.EvictionListener;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.lucene.docset.DocSet;
-import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.cache.filter.support.AbstractWeightedFilterCache;
 import org.elasticsearch.index.cache.filter.support.FilterCacheValue;
 import org.elasticsearch.monitor.jvm.JvmInfo;
+import org.elasticsearch.node.settings.NodeSettingsService;
+import org.elasticsearch.threadpool.ThreadPool;
 
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 public class IndicesNodeFilterCache extends AbstractComponent implements EvictionListener<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>> {
 
+    private final ThreadPool threadPool;
+
     private ConcurrentMap<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>> cache;
 
+    private volatile String size;
     private volatile long sizeInBytes;
 
     private final CopyOnWriteArrayList<EvictionListener<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>>> evictionListeners =
             new CopyOnWriteArrayList<EvictionListener<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>>>();
 
-    public IndicesNodeFilterCache() {
-        this(ImmutableSettings.Builder.EMPTY_SETTINGS);
+    @Inject public IndicesNodeFilterCache(Settings settings, ThreadPool threadPool, NodeSettingsService nodeSettingsService) {
+        super(settings);
+        this.threadPool = threadPool;
+        this.size = componentSettings.get("size", "20%");
+        computeSizeInBytes();
+        buildCache();
+        logger.debug("using [node] filter cache with size [{}], actual_size [{}]", size, new ByteSizeValue(sizeInBytes));
+
+        nodeSettingsService.addListener(new ApplySettings());
     }
 
-    @Inject public IndicesNodeFilterCache(Settings settings) {
-        super(settings);
-
-        String size = componentSettings.get("size", "20%");
-        if (size.endsWith("%")) {
-            double percent = Double.parseDouble(size.substring(0, size.length() - 1));
-            sizeInBytes = (long) ((percent / 100) * JvmInfo.jvmInfo().getMem().getHeapMax().bytes());
-        } else {
-            sizeInBytes = ByteSizeValue.parseBytesSizeValue(size).bytes();
-        }
+    private void buildCache() {
+        TimeValue catchupTime = componentSettings.getAsTime("catchup", TimeValue.timeValueSeconds(10));
 
         int weightedSize = (int) Math.min(sizeInBytes / AbstractWeightedFilterCache.FilterCacheValueWeigher.FACTOR, Integer.MAX_VALUE);
 
@@ -64,9 +69,17 @@ public class IndicesNodeFilterCache extends AbstractComponent implements Evictio
                 .maximumWeightedCapacity(weightedSize)
                 .weigher(new AbstractWeightedFilterCache.FilterCacheValueWeigher())
                 .listener(this)
+                .catchup(this.threadPool.scheduler(), catchupTime.millis(), TimeUnit.MILLISECONDS)
                 .build();
+    }
 
-        logger.debug("using [node] filter cache with size [{}]", new ByteSizeValue(sizeInBytes));
+    private void computeSizeInBytes() {
+        if (size.endsWith("%")) {
+            double percent = Double.parseDouble(size.substring(0, size.length() - 1));
+            sizeInBytes = (long) ((percent / 100) * JvmInfo.jvmInfo().getMem().getHeapMax().bytes());
+        } else {
+            sizeInBytes = ByteSizeValue.parseBytesSizeValue(size).bytes();
+        }
     }
 
     public void addEvictionListener(EvictionListener<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>> listener) {
@@ -88,6 +101,20 @@ public class IndicesNodeFilterCache extends AbstractComponent implements Evictio
     @Override public void onEviction(AbstractWeightedFilterCache.FilterCacheKey filterCacheKey, FilterCacheValue<DocSet> docSetFilterCacheValue) {
         for (EvictionListener<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>> listener : evictionListeners) {
             listener.onEviction(filterCacheKey, docSetFilterCacheValue);
+        }
+    }
+
+    class ApplySettings implements NodeSettingsService.Listener {
+        @Override public void onRefreshSettings(Settings settings) {
+            String size = settings.get("indices.cache.filter.size", IndicesNodeFilterCache.this.size);
+            if (!size.equals(IndicesNodeFilterCache.this.size)) {
+                logger.info("updating [indices.cache.filter.size] from [{}] to [{}]", IndicesNodeFilterCache.this.size, size);
+                IndicesNodeFilterCache.this.size = size;
+                ConcurrentMap<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>> oldCache = IndicesNodeFilterCache.this.cache;
+                computeSizeInBytes();
+                buildCache();
+                oldCache.clear();
+            }
         }
     }
 }

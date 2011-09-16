@@ -24,6 +24,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Sort;
 import org.elasticsearch.ElasticSearchException;
 import org.elasticsearch.action.search.SearchType;
+import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.collect.ImmutableList;
 import org.elasticsearch.common.collect.Lists;
 import org.elasticsearch.common.lease.Releasable;
@@ -38,6 +39,7 @@ import org.elasticsearch.index.query.IndexQueryParserService;
 import org.elasticsearch.index.query.ParsedQuery;
 import org.elasticsearch.index.search.nested.BlockJoinQuery;
 import org.elasticsearch.index.service.IndexService;
+import org.elasticsearch.index.shard.service.IndexShard;
 import org.elasticsearch.index.similarity.SimilarityService;
 import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.search.Scroll;
@@ -86,6 +88,8 @@ public class SearchContext implements Releasable {
 
     private final ScriptService scriptService;
 
+    private final IndexShard indexShard;
+
     private final IndexService indexService;
 
     private final ContextIndexSearcher searcher;
@@ -96,10 +100,14 @@ public class SearchContext implements Releasable {
 
     private final FetchSearchResult fetchResult;
 
+    private final long nowInMillis;
+
     private final TimeValue timeout;
 
     private float queryBoost = 1.0f;
 
+
+    private List<String> groupStats;
 
     private Scroll scroll;
 
@@ -153,9 +161,10 @@ public class SearchContext implements Releasable {
 
     private Map<String, BlockJoinQuery> nestedQueries;
 
-    public SearchContext(long id, SearchShardTarget shardTarget, SearchType searchType, int numberOfShards, TimeValue timeout,
-                         String[] types, Engine.Searcher engineSearcher, IndexService indexService, ScriptService scriptService) {
+    public SearchContext(long id, SearchShardTarget shardTarget, SearchType searchType, int numberOfShards, long nowInMillis, TimeValue timeout,
+                         String[] types, Engine.Searcher engineSearcher, IndexService indexService, IndexShard indexShard, ScriptService scriptService) {
         this.id = id;
+        this.nowInMillis = nowInMillis;
         this.searchType = searchType;
         this.shardTarget = shardTarget;
         this.numberOfShards = numberOfShards;
@@ -166,6 +175,7 @@ public class SearchContext implements Releasable {
         this.dfsResult = new DfsSearchResult(id, shardTarget);
         this.queryResult = new QuerySearchResult(id, shardTarget);
         this.fetchResult = new FetchSearchResult(id, shardTarget);
+        this.indexShard = indexShard;
         this.indexService = indexService;
 
         this.searcher = new ContextIndexSearcher(this, engineSearcher);
@@ -209,6 +219,10 @@ public class SearchContext implements Releasable {
         return this.numberOfShards;
     }
 
+    public boolean hasTypes() {
+        return types != null && types.length > 0;
+    }
+
     public String[] types() {
         return types;
     }
@@ -220,6 +234,10 @@ public class SearchContext implements Releasable {
     public SearchContext queryBoost(float queryBoost) {
         this.queryBoost = queryBoost;
         return this;
+    }
+
+    public long nowInMillis() {
+        return nowInMillis;
     }
 
     public Scroll scroll() {
@@ -261,6 +279,10 @@ public class SearchContext implements Releasable {
 
     public ContextIndexSearcher searcher() {
         return this.searcher;
+    }
+
+    public IndexShard indexShard() {
+        return this.indexShard;
     }
 
     public MapperService mapperService() {
@@ -417,6 +439,14 @@ public class SearchContext implements Releasable {
 
     public void explain(boolean explain) {
         this.explain = explain;
+    }
+
+    @Nullable public List<String> groupStats() {
+        return this.groupStats;
+    }
+
+    public void groupStats(List<String> groupStats) {
+        this.groupStats = groupStats;
     }
 
     public boolean version() {

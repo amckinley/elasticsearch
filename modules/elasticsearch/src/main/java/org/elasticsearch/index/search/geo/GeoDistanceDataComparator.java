@@ -21,10 +21,11 @@ package org.elasticsearch.index.search.geo;
 
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.FieldComparator;
-import org.apache.lucene.search.FieldComparatorSource;
+import org.apache.lucene.search.SortField;
 import org.elasticsearch.ElasticSearchIllegalArgumentException;
 import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.index.cache.field.data.FieldDataCache;
+import org.elasticsearch.index.field.data.FieldDataType;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.geo.GeoPointFieldData;
@@ -38,12 +39,12 @@ import java.io.IOException;
 // LUCENE MONITOR: Monitor against FieldComparator.Double
 public class GeoDistanceDataComparator extends FieldComparator {
 
-    public static FieldComparatorSource comparatorSource(String fieldName, double lat, double lon, DistanceUnit unit, GeoDistance geoDistance,
-                                                         FieldDataCache fieldDataCache, MapperService mapperService) {
+    public static FieldDataType.ExtendedFieldComparatorSource comparatorSource(String fieldName, double lat, double lon, DistanceUnit unit, GeoDistance geoDistance,
+                                                                               FieldDataCache fieldDataCache, MapperService mapperService) {
         return new InnerSource(fieldName, lat, lon, unit, geoDistance, fieldDataCache, mapperService);
     }
 
-    private static class InnerSource extends FieldComparatorSource {
+    static class InnerSource extends FieldDataType.ExtendedFieldComparatorSource {
 
         protected final String fieldName;
 
@@ -73,6 +74,10 @@ public class GeoDistanceDataComparator extends FieldComparator {
         @Override public FieldComparator newComparator(String fieldname, int numHits, int sortPos, boolean reversed) throws IOException {
             return new GeoDistanceDataComparator(numHits, fieldname, lat, lon, unit, geoDistance, fieldDataCache, mapperService);
         }
+
+        @Override public int reducedType() {
+            return SortField.DOUBLE;
+        }
     }
 
     protected final String fieldName;
@@ -86,6 +91,7 @@ public class GeoDistanceDataComparator extends FieldComparator {
     protected final DistanceUnit unit;
 
     protected final GeoDistance geoDistance;
+    protected final GeoDistance.FixedSourceDistance fixedSourceDistance;
 
     protected final FieldDataCache fieldDataCache;
 
@@ -105,6 +111,8 @@ public class GeoDistanceDataComparator extends FieldComparator {
         this.unit = unit;
         this.geoDistance = geoDistance;
         this.fieldDataCache = fieldDataCache;
+
+        this.fixedSourceDistance = geoDistance.fixedSourceDistance(lat, lon, unit);
 
         FieldMapper mapper = mapperService.smartNameFieldMapper(fieldName);
         if (mapper == null) {
@@ -138,7 +146,7 @@ public class GeoDistanceDataComparator extends FieldComparator {
             // is this true? push this to the "end"
             distance = Double.MAX_VALUE;
         } else {
-            distance = geoDistance.calculate(lat, lon, fieldData.latValue(doc), fieldData.lonValue(doc), unit);
+            distance = fixedSourceDistance.calculate(fieldData.latValue(doc), fieldData.lonValue(doc));
         }
         final double v2 = distance;
         if (bottom > v2) {
@@ -156,7 +164,7 @@ public class GeoDistanceDataComparator extends FieldComparator {
             // is this true? push this to the "end"
             distance = Double.MAX_VALUE;
         } else {
-            distance = geoDistance.calculate(lat, lon, fieldData.latValue(doc), fieldData.lonValue(doc), unit);
+            distance = fixedSourceDistance.calculate(fieldData.latValue(doc), fieldData.lonValue(doc));
         }
         values[slot] = distance;
     }

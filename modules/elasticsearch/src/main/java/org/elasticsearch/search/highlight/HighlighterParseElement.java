@@ -72,6 +72,7 @@ public class HighlighterParseElement implements SearchParseElement {
         boolean globalHighlightFilter = true;
         int globalFragmentSize = 100;
         int globalNumOfFragments = 5;
+        String globalEncoder = "default";
 
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
             if (token == XContentParser.Token.FIELD_NAME) {
@@ -106,6 +107,9 @@ public class HighlighterParseElement implements SearchParseElement {
                 } else if ("number_of_fragments".equals(topLevelFieldName) || "numberOfFragments".equals(topLevelFieldName)) {
                     globalNumOfFragments = parser.intValue();
                 }
+                else if ("encoder".equals(topLevelFieldName)){
+                   globalEncoder = parser.text();
+                }
             } else if (token == XContentParser.Token.START_OBJECT) {
                 if ("fields".equals(topLevelFieldName)) {
                     String highlightFieldName = null;
@@ -137,9 +141,11 @@ public class HighlighterParseElement implements SearchParseElement {
                                         field.fragmentCharSize(parser.intValue());
                                     } else if ("number_of_fragments".equals(fieldName) || "numberOfFragments".equals(fieldName)) {
                                         field.numberOfFragments(parser.intValue());
+                                    } else if ("fragment_offset".equals(fieldName) || "fragmentOffset".equals(fieldName)) {
+                                        field.fragmentOffset(parser.intValue());
                                     } else if ("highlight_filter".equals(fieldName) || "highlightFilter".equals(fieldName)) {
                                         field.highlightFilter(parser.booleanValue());
-                                    } else if ("score".equals(fieldName)) {
+                                    } else if ("order".equals(fieldName)) {
                                         field.scoreOrdered("score".equals(parser.text()));
                                     }
                                 }
@@ -174,6 +180,10 @@ public class HighlighterParseElement implements SearchParseElement {
             if (field.numberOfFragments() == -1) {
                 field.numberOfFragments(globalNumOfFragments);
             }
+            if (field.encoder() == null){
+                field.encoder(globalEncoder);
+            }
+
         }
 
         context.highlight(new SearchContextHighlight(fields));

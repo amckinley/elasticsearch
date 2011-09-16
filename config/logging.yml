@@ -10,7 +10,10 @@ logger:
   #index.gateway: DEBUG
 
   # peer shard recovery
-  #index.shard.recovery: DEBUG
+  #indices.recovery: DEBUG
+
+  # discovery
+  #discovery: TRACE
 
 appender:
   console:

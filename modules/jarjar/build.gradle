@@ -5,19 +5,21 @@ archivesBaseName = "$project.archivesBaseName"
 dependencies {
     runtime 'com.googlecode.concurrentlinkedhashmap:concurrentlinkedhashmap-lru:1.2'
     runtime 'com.google.guava:guava:r09'
-    runtime 'org.elasticsearch:es-trove:3.0.0rc2'
-    runtime 'org.elasticsearch:es-jsr166y:20110710'
+    runtime 'org.elasticsearch:es-trove:3.0.0'
+    runtime 'org.elasticsearch:es-jsr166y:20110820'
+    runtime 'org.elasticsearch:es-jsr166e:20110820'
 
     runtime 'commons-codec:commons-codec:1.5'
 
+    // joda 2.0 moved to using volatile fields for datetime, which hurts performance for facets!
     runtime 'joda-time:joda-time:1.6.2'
-    runtime 'org.mvel:mvel2:2.1.Beta5'
+    runtime 'org.mvel:mvel2:2.1.Beta6'
 
-    runtime 'org.codehaus.jackson:jackson-core-asl:1.8.2'
-    runtime 'org.codehaus.jackson:jackson-smile:1.8.2'
+    runtime 'org.codehaus.jackson:jackson-core-asl:1.8.5'
+    runtime 'org.codehaus.jackson:jackson-smile:1.8.5'
     runtime 'org.yaml:snakeyaml:1.6'
 
-    runtime('org.jboss.netty:netty:3.2.4.Final') { transitive = false }
+    runtime('org.jboss.netty:netty:3.2.5.Final') { transitive = false }
 }
 
 configurations {
@@ -35,7 +37,7 @@ jar << {
         jarjar(jarfile: jarjarArchivePath) {
             zipfileset(src: jar.archivePath)
             configurations.runtime.files.findAll {file ->
-                ['inject', 'codec', 'mvel', 'jackson', 'joda', 'snakeyaml', 'netty', 'guice', 'javax.inject', 'aopalliance', 'guava', 'concurrentlinkedhashmap', 'trove', 'jsr166y'].any { file.name.contains(it) }
+                ['inject', 'codec', 'mvel', 'jackson', 'joda', 'snakeyaml', 'netty', 'guice', 'javax.inject', 'aopalliance', 'guava', 'concurrentlinkedhashmap', 'trove', 'jsr166y', 'jsr166e'].any { file.name.contains(it) }
             }.each { jarjarFile ->
                 zipfileset(src: jarjarFile) {
                     exclude(name: "META-INF/**")
@@ -45,6 +47,7 @@ jar << {
             rule pattern: "com.google.common.**", result: "org.elasticsearch.common.@1"
             rule pattern: "gnu.trove.**", result: "org.elasticsearch.common.trove.@1"
             rule pattern: "jsr166y.**", result: "org.elasticsearch.common.util.concurrent.jsr166y.@1"
+            rule pattern: "jsr166e.**", result: "org.elasticsearch.common.util.concurrent.jsr166e.@1"
 
             rule pattern: "org.aopalliance.**", result: "org.elasticsearch.common.aopalliance.@1"
             rule pattern: "javax.inject.**", result: "org.elasticsearch.common.inject.jex.@1"
@@ -71,6 +74,7 @@ jar << {
         delete(file: "build/tmp/extracted/LICENSE")
         delete(file: "build/tmp/extracted/build.properties")
         delete(dir: "build/tmp/extracted/jsr166y")
+        delete(dir: "build/tmp/extracted/jsr166e")
         delete(dir: "build/tmp/extracted/gnu")
         delete(dir: "build/tmp/extracted/org/codehaus")
         delete(dir: "build/tmp/extracted/org/aopalliance")

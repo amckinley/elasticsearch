@@ -78,6 +78,8 @@ public class QueryStringQueryBuilder extends BaseQueryBuilder {
 
     private float tieBreaker = -1;
 
+    private String rewrite = null;
+
     public QueryStringQueryBuilder(String queryString) {
         this.queryString = queryString;
     }
@@ -168,8 +170,9 @@ public class QueryStringQueryBuilder extends BaseQueryBuilder {
      * Set to false if phrase queries should only be generated when
      * surrounded by double quotes.
      */
-    public void autoGeneratePhraseQueries(boolean autoGeneratePhraseQueries) {
+    public QueryStringQueryBuilder autoGeneratePhraseQueries(boolean autoGeneratePhraseQueries) {
         this.autoGeneratePhraseQueries = autoGeneratePhraseQueries;
+        return this;
     }
 
     /**
@@ -231,6 +234,11 @@ public class QueryStringQueryBuilder extends BaseQueryBuilder {
      */
     public QueryStringQueryBuilder analyzeWildcard(boolean analyzeWildcard) {
         this.analyzeWildcard = analyzeWildcard;
+        return this;
+    }
+
+    public QueryStringQueryBuilder rewrite(String rewrite) {
+        this.rewrite = rewrite;
         return this;
     }
 
@@ -301,6 +309,9 @@ public class QueryStringQueryBuilder extends BaseQueryBuilder {
         }
         if (analyzeWildcard != null) {
             builder.field("analyze_wildcard", analyzeWildcard);
+        }
+        if (rewrite != null) {
+            builder.field("rewrite", rewrite);
         }
         builder.endObject();
     }

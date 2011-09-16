@@ -23,16 +23,13 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.DocIdSet;
 import org.apache.lucene.search.Filter;
 import org.elasticsearch.ElasticSearchException;
-import org.elasticsearch.common.RamUsage;
-import org.elasticsearch.common.collect.Sets;
 import org.elasticsearch.common.concurrentlinkedhashmap.EvictionListener;
 import org.elasticsearch.common.concurrentlinkedhashmap.Weigher;
-import org.elasticsearch.common.lab.LongsLAB;
 import org.elasticsearch.common.lucene.docset.DocSet;
 import org.elasticsearch.common.lucene.search.NoCacheFilter;
+import org.elasticsearch.common.metrics.CounterMetric;
+import org.elasticsearch.common.metrics.MeanMetric;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.unit.ByteSizeUnit;
-import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.index.AbstractIndexComponent;
 import org.elasticsearch.index.Index;
@@ -40,40 +37,18 @@ import org.elasticsearch.index.cache.filter.FilterCache;
 import org.elasticsearch.index.settings.IndexSettings;
 
 import java.io.IOException;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 public abstract class AbstractWeightedFilterCache extends AbstractIndexComponent implements FilterCache, IndexReader.ReaderFinishedListener, EvictionListener<AbstractWeightedFilterCache.FilterCacheKey, FilterCacheValue<DocSet>> {
 
     final ConcurrentMap<Object, Boolean> seenReaders = ConcurrentCollections.newConcurrentMap();
+    final CounterMetric seenReadersCount = new CounterMetric();
 
-    final boolean labEnabled;
-    final ByteSizeValue labMaxAlloc;
-    final ByteSizeValue labChunkSize;
-
-    final int labMaxAllocBytes;
-    final int labChunkSizeBytes;
-
-    protected final AtomicLong evictions = new AtomicLong();
+    final CounterMetric evictionsMetric = new CounterMetric();
+    final MeanMetric totalMetric = new MeanMetric();
 
     protected AbstractWeightedFilterCache(Index index, @IndexSettings Settings indexSettings) {
         super(index, indexSettings);
-
-        // The LAB is stored per reader, so whole chunks will be cleared once reader is discarded.
-        // This means that with filter entry specific based eviction, like access time
-        // we might get into cases where the LAB is held by a puny filter and other filters have been released.
-        // This usually will not be that bad, compared to the GC benefit of using a LAB, but, that is why
-        // the soft filter cache is recommended.
-        this.labEnabled = componentSettings.getAsBoolean("lab", false);
-        // These values should not be too high, basically we want to cached the small readers and use the LAB for
-        // them, 1M docs on OpenBitSet is around 110kb.
-        this.labMaxAlloc = componentSettings.getAsBytesSize("lab.max_alloc", new ByteSizeValue(128, ByteSizeUnit.KB));
-        this.labChunkSize = componentSettings.getAsBytesSize("lab.chunk_size", new ByteSizeValue(1, ByteSizeUnit.MB));
-
-        this.labMaxAllocBytes = (int) (labMaxAlloc.bytes() / RamUsage.NUM_BYTES_LONG);
-        this.labChunkSizeBytes = (int) (labChunkSize.bytes() / RamUsage.NUM_BYTES_LONG);
     }
 
     protected abstract ConcurrentMap<FilterCacheKey, FilterCacheValue<DocSet>> cache();
@@ -88,10 +63,14 @@ public abstract class AbstractWeightedFilterCache extends AbstractIndexComponent
             if (removed == null) {
                 return;
             }
+            seenReadersCount.dec();
             ConcurrentMap<FilterCacheKey, FilterCacheValue<DocSet>> cache = cache();
             for (FilterCacheKey key : cache.keySet()) {
                 if (key.readerKey() == readerKey) {
-                    cache.remove(key);
+                    FilterCacheValue<DocSet> removed2 = cache.remove(key);
+                    if (removed2 != null) {
+                        totalMetric.dec(removed2.value().sizeInBytes());
+                    }
                 }
             }
         }
@@ -108,34 +87,25 @@ public abstract class AbstractWeightedFilterCache extends AbstractIndexComponent
         if (removed == null) {
             return;
         }
+        seenReadersCount.dec();
         ConcurrentMap<FilterCacheKey, FilterCacheValue<DocSet>> cache = cache();
         for (FilterCacheKey key : cache.keySet()) {
             if (key.readerKey() == reader.getCoreCacheKey()) {
-                cache.remove(key);
+                FilterCacheValue<DocSet> removed2 = cache.remove(key);
+                if (removed2 != null) {
+                    totalMetric.dec(removed2.value().sizeInBytes());
+                }
             }
         }
     }
 
     @Override public EntriesStats entriesStats() {
-        long sizeInBytes = 0;
-        long totalCount = 0;
-        Set<Object> segmentsCount = Sets.newHashSet();
-        for (Map.Entry<FilterCacheKey, FilterCacheValue<DocSet>> entry : cache().entrySet()) {
-            // if its not a reader associated with this index, then don't aggreagte stats for it
-            if (!seenReaders.containsKey(entry.getKey().readerKey())) {
-                continue;
-            }
-            if (!segmentsCount.contains(entry.getKey().readerKey())) {
-                segmentsCount.add(entry.getKey().readerKey());
-            }
-            sizeInBytes += entry.getValue().value().sizeInBytes();
-            totalCount++;
-        }
-        return new EntriesStats(sizeInBytes, segmentsCount.size() == 0 ? 0 : totalCount / segmentsCount.size());
+        long seenReadersCount = this.seenReadersCount.count();
+        return new EntriesStats(totalMetric.sum(), seenReadersCount == 0 ? 0 : totalMetric.count() / seenReadersCount);
     }
 
     @Override public long evictions() {
-        return evictions.get();
+        return evictionsMetric.count();
     }
 
     @Override public Filter cache(Filter filterToCache) {
@@ -164,24 +134,30 @@ public abstract class AbstractWeightedFilterCache extends AbstractIndexComponent
         }
 
         @Override public DocIdSet getDocIdSet(IndexReader reader) throws IOException {
-            FilterCacheKey cacheKey = new FilterCacheKey(reader.getCoreCacheKey(), filter);
+            Object filterKey = filter;
+            if (filter instanceof CacheKeyFilter) {
+                filterKey = ((CacheKeyFilter) filter).cacheKey();
+            }
+            FilterCacheKey cacheKey = new FilterCacheKey(reader.getCoreCacheKey(), filterKey);
             ConcurrentMap<FilterCacheKey, FilterCacheValue<DocSet>> innerCache = cache.cache();
 
             FilterCacheValue<DocSet> cacheValue = innerCache.get(cacheKey);
             if (cacheValue == null) {
                 if (!cache.seenReaders.containsKey(reader.getCoreCacheKey())) {
-                    reader.addReaderFinishedListener(cache);
-                    cache.seenReaders.put(reader.getCoreCacheKey(), Boolean.TRUE);
+                    Boolean previous = cache.seenReaders.putIfAbsent(reader.getCoreCacheKey(), Boolean.TRUE);
+                    if (previous == null) {
+                        reader.addReaderFinishedListener(cache);
+                        cache.seenReadersCount.inc();
+                    }
                 }
 
-                LongsLAB longsLAB = null;
-                if (cache.labEnabled) {
-                    longsLAB = new LongsLAB(cache.labChunkSizeBytes, cache.labMaxAllocBytes);
-                }
                 DocIdSet docIdSet = filter.getDocIdSet(reader);
-                DocSet docSet = FilterCacheValue.cacheable(reader, longsLAB, docIdSet);
-                cacheValue = new FilterCacheValue<DocSet>(docSet, longsLAB);
-                innerCache.putIfAbsent(cacheKey, cacheValue);
+                DocSet docSet = FilterCacheValue.cacheable(reader, docIdSet);
+                cacheValue = new FilterCacheValue<DocSet>(docSet);
+                FilterCacheValue<DocSet> previous = innerCache.putIfAbsent(cacheKey, cacheValue);
+                if (previous == null) {
+                    cache.totalMetric.inc(cacheValue.value().sizeInBytes());
+                }
             }
 
             return cacheValue.value() == DocSet.EMPTY_DOC_SET ? null : cacheValue.value();
@@ -216,37 +192,40 @@ public abstract class AbstractWeightedFilterCache extends AbstractIndexComponent
     @Override public void onEviction(FilterCacheKey filterCacheKey, FilterCacheValue<DocSet> docSetFilterCacheValue) {
         if (filterCacheKey != null) {
             if (seenReaders.containsKey(filterCacheKey.readerKey())) {
-                evictions.incrementAndGet();
+                evictionsMetric.inc();
+                if (docSetFilterCacheValue != null) {
+                    totalMetric.dec(docSetFilterCacheValue.value().sizeInBytes());
+                }
             }
         }
     }
 
     public static class FilterCacheKey {
         private final Object readerKey;
-        private final Filter filter;
+        private final Object filterKey;
 
-        public FilterCacheKey(Object readerKey, Filter filter) {
+        public FilterCacheKey(Object readerKey, Object filterKey) {
             this.readerKey = readerKey;
-            this.filter = filter;
+            this.filterKey = filterKey;
         }
 
         public Object readerKey() {
             return readerKey;
         }
 
-        public Filter filter() {
-            return filter;
+        public Object filterKey() {
+            return filterKey;
         }
 
         @Override public boolean equals(Object o) {
             if (this == o) return true;
 //            if (o == null || getClass() != o.getClass()) return false;
             FilterCacheKey that = (FilterCacheKey) o;
-            return (readerKey == that.readerKey && filter.equals(that.filter));
+            return (readerKey == that.readerKey && filterKey.equals(that.filterKey));
         }
 
         @Override public int hashCode() {
-            return readerKey.hashCode() + 31 * filter().hashCode();
+            return readerKey.hashCode() + 31 * filterKey.hashCode();
         }
     }
 }

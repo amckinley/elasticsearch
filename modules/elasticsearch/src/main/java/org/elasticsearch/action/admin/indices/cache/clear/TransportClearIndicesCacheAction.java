@@ -135,6 +135,7 @@ public class TransportClearIndicesCacheAction extends TransportBroadcastOperatio
             if (!clearedAtLeastOne) {
                 service.cache().clear();
             }
+            service.cache().invalidateCache();
         }
         return new ShardClearIndicesCacheResponse(request.index(), request.shardId());
     }
@@ -143,6 +144,6 @@ public class TransportClearIndicesCacheAction extends TransportBroadcastOperatio
      * The refresh request works against *all* shards.
      */
     @Override protected GroupShardsIterator shards(ClearIndicesCacheRequest request, String[] concreteIndices, ClusterState clusterState) {
-        return clusterState.routingTable().allShardsGrouped(concreteIndices);
+        return clusterState.routingTable().allActiveShardsGrouped(concreteIndices, true);
     }
 }

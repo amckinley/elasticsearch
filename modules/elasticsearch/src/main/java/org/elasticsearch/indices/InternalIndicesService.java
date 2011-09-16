@@ -26,13 +26,13 @@ import org.elasticsearch.common.collect.ImmutableMap;
 import org.elasticsearch.common.collect.ImmutableSet;
 import org.elasticsearch.common.collect.UnmodifiableIterator;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
+import org.elasticsearch.common.inject.CreationException;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Injector;
 import org.elasticsearch.common.inject.Injectors;
 import org.elasticsearch.common.inject.ModulesBuilder;
 import org.elasticsearch.common.io.FileSystemUtils;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.util.concurrent.ThreadSafe;
 import org.elasticsearch.env.NodeEnvironment;
@@ -49,11 +49,13 @@ import org.elasticsearch.index.analysis.AnalysisService;
 import org.elasticsearch.index.cache.CacheStats;
 import org.elasticsearch.index.cache.IndexCache;
 import org.elasticsearch.index.cache.IndexCacheModule;
-import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.IndexEngine;
 import org.elasticsearch.index.engine.IndexEngineModule;
+import org.elasticsearch.index.flush.FlushStats;
 import org.elasticsearch.index.gateway.IndexGateway;
 import org.elasticsearch.index.gateway.IndexGatewayModule;
+import org.elasticsearch.index.get.GetStats;
+import org.elasticsearch.index.indexing.IndexingStats;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MapperServiceModule;
 import org.elasticsearch.index.merge.MergeStats;
@@ -61,21 +63,24 @@ import org.elasticsearch.index.percolator.PercolatorModule;
 import org.elasticsearch.index.percolator.PercolatorService;
 import org.elasticsearch.index.query.IndexQueryParserModule;
 import org.elasticsearch.index.query.IndexQueryParserService;
+import org.elasticsearch.index.refresh.RefreshStats;
+import org.elasticsearch.index.search.stats.SearchStats;
 import org.elasticsearch.index.service.IndexService;
 import org.elasticsearch.index.service.InternalIndexService;
 import org.elasticsearch.index.settings.IndexSettingsModule;
-import org.elasticsearch.index.shard.IndexShardState;
+import org.elasticsearch.index.shard.DocsStats;
+import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.service.IndexShard;
-import org.elasticsearch.index.shard.service.InternalIndexShard;
 import org.elasticsearch.index.similarity.SimilarityModule;
 import org.elasticsearch.index.store.IndexStoreModule;
+import org.elasticsearch.index.store.StoreStats;
 import org.elasticsearch.indices.analysis.IndicesAnalysisService;
+import org.elasticsearch.indices.recovery.RecoverySettings;
 import org.elasticsearch.indices.store.IndicesStore;
 import org.elasticsearch.plugins.IndexPluginsModule;
 import org.elasticsearch.plugins.PluginsService;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -114,6 +119,8 @@ public class InternalIndicesService extends AbstractLifecycleComponent<IndicesSe
 
     private volatile ImmutableMap<String, IndexService> indices = ImmutableMap.of();
 
+    private final OldShardsStats oldShardsStats = new OldShardsStats();
+
     @Inject public InternalIndicesService(Settings settings, NodeEnvironment nodeEnv, ThreadPool threadPool, IndicesLifecycle indicesLifecycle, IndicesAnalysisService indicesAnalysisService, IndicesStore indicesStore, Injector injector) {
         super(settings);
         this.nodeEnv = nodeEnv;
@@ -124,6 +131,8 @@ public class InternalIndicesService extends AbstractLifecycleComponent<IndicesSe
         this.injector = injector;
 
         this.pluginsService = injector.getInstance(PluginsService.class);
+
+        this.indicesLifecycle.addListener(oldShardsStats);
     }
 
     @Override protected void doStart() throws ElasticSearchException {
@@ -160,6 +169,7 @@ public class InternalIndicesService extends AbstractLifecycleComponent<IndicesSe
     }
 
     @Override protected void doClose() throws ElasticSearchException {
+        injector.getInstance(RecoverySettings.class).close();
         indicesStore.close();
         indicesAnalysisService.close();
     }
@@ -168,32 +178,40 @@ public class InternalIndicesService extends AbstractLifecycleComponent<IndicesSe
         return this.indicesLifecycle;
     }
 
-    @Override public NodeIndicesStats stats() {
-        long storeTotalSize = 0;
-        long numberOfDocs = 0;
+    @Override public NodeIndicesStats stats(boolean includePrevious) {
+        DocsStats docsStats = new DocsStats();
+        StoreStats storeStats = new StoreStats();
+        IndexingStats indexingStats = new IndexingStats();
+        GetStats getStats = new GetStats();
+        SearchStats searchStats = new SearchStats();
         CacheStats cacheStats = new CacheStats();
         MergeStats mergeStats = new MergeStats();
+        RefreshStats refreshStats = new RefreshStats();
+        FlushStats flushStats = new FlushStats();
+
+        if (includePrevious) {
+            getStats.add(oldShardsStats.getStats);
+            indexingStats.add(oldShardsStats.indexingStats);
+            searchStats.add(oldShardsStats.searchStats);
+            mergeStats.add(oldShardsStats.mergeStats);
+            refreshStats.add(oldShardsStats.refreshStats);
+            flushStats.add(oldShardsStats.flushStats);
+        }
+
         for (IndexService indexService : indices.values()) {
             for (IndexShard indexShard : indexService) {
-                try {
-                    storeTotalSize += ((InternalIndexShard) indexShard).store().estimateSize().bytes();
-                } catch (IOException e) {
-                    // ignore
-                }
-
-                if (indexShard.state() == IndexShardState.STARTED) {
-                    Engine.Searcher searcher = indexShard.searcher();
-                    try {
-                        numberOfDocs += searcher.reader().numDocs();
-                    } finally {
-                        searcher.release();
-                    }
-                }
-                mergeStats.add(((InternalIndexShard) indexShard).mergeScheduler().stats());
+                storeStats.add(indexShard.storeStats());
+                docsStats.add(indexShard.docStats());
+                getStats.add(indexShard.getStats());
+                indexingStats.add(indexShard.indexingStats());
+                searchStats.add(indexShard.searchStats());
+                mergeStats.add(indexShard.mergeStats());
+                refreshStats.add(indexShard.refreshStats());
+                flushStats.add(indexShard.flushStats());
             }
             cacheStats.add(indexService.cache().stats());
         }
-        return new NodeIndicesStats(new ByteSizeValue(storeTotalSize), numberOfDocs, cacheStats, mergeStats);
+        return new NodeIndicesStats(storeStats, docsStats, indexingStats, getStats, searchStats, cacheStats, mergeStats, refreshStats, flushStats);
     }
 
     /**
@@ -265,7 +283,12 @@ public class InternalIndicesService extends AbstractLifecycleComponent<IndicesSe
         modules.add(new IndexModule());
         modules.add(new PercolatorModule());
 
-        Injector indexInjector = modules.createChildInjector(injector);
+        Injector indexInjector;
+        try {
+            indexInjector = modules.createChildInjector(injector);
+        } catch (CreationException e) {
+            throw new IndexCreationException(index, Injectors.getFirstErrorFailure(e));
+        }
 
         indicesInjectors.put(index.name(), indexInjector);
 
@@ -330,6 +353,27 @@ public class InternalIndicesService extends AbstractLifecycleComponent<IndicesSe
 
         if (delete) {
             FileSystemUtils.deleteRecursively(nodeEnv.indexLocation(new Index(index)));
+        }
+    }
+
+    static class OldShardsStats extends IndicesLifecycle.Listener {
+
+        final SearchStats searchStats = new SearchStats();
+        final GetStats getStats = new GetStats();
+        final IndexingStats indexingStats = new IndexingStats();
+        final MergeStats mergeStats = new MergeStats();
+        final RefreshStats refreshStats = new RefreshStats();
+        final FlushStats flushStats = new FlushStats();
+
+        @Override public synchronized void beforeIndexShardClosed(ShardId shardId, @Nullable IndexShard indexShard, boolean delete) {
+            if (indexShard != null) {
+                getStats.add(indexShard.getStats());
+                indexingStats.add(indexShard.indexingStats(), false);
+                searchStats.add(indexShard.searchStats(), false);
+                mergeStats.add(indexShard.mergeStats());
+                refreshStats.add(indexShard.refreshStats());
+                flushStats.add(indexShard.flushStats());
+            }
         }
     }
 }

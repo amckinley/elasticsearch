@@ -19,8 +19,8 @@
 
 package org.elasticsearch.index.mapper.selector;
 
-import org.apache.lucene.document.FieldSelector;
 import org.apache.lucene.document.FieldSelectorResult;
+import org.elasticsearch.common.lucene.document.ResetFieldSelector;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.FieldMappers;
 
@@ -29,7 +29,7 @@ import java.util.HashSet;
 /**
  * @author kimchy (shay.banon)
  */
-public class FieldMappersFieldSelector implements FieldSelector {
+public class FieldMappersFieldSelector implements ResetFieldSelector {
 
     private final HashSet<String> names = new HashSet<String>();
 
@@ -48,5 +48,8 @@ public class FieldMappersFieldSelector implements FieldSelector {
             return FieldSelectorResult.LOAD;
         }
         return FieldSelectorResult.NO_LOAD;
+    }
+
+    @Override public void reset() {
     }
 }

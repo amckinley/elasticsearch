@@ -52,6 +52,7 @@ public class IndexRoutingTable implements Iterable<IndexShardRoutingTable> {
     private final ImmutableMap<Integer, IndexShardRoutingTable> shards;
 
     private final ImmutableList<ShardRouting> allShards;
+    private final ImmutableList<ShardRouting> allActiveShards;
 
     private final AtomicInteger counter = new AtomicInteger();
 
@@ -59,12 +60,17 @@ public class IndexRoutingTable implements Iterable<IndexShardRoutingTable> {
         this.index = index;
         this.shards = ImmutableMap.copyOf(shards);
         ImmutableList.Builder<ShardRouting> allShards = ImmutableList.builder();
+        ImmutableList.Builder<ShardRouting> allActiveShards = ImmutableList.builder();
         for (IndexShardRoutingTable indexShardRoutingTable : shards.values()) {
             for (ShardRouting shardRouting : indexShardRoutingTable) {
                 allShards.add(shardRouting);
+                if (shardRouting.active()) {
+                    allActiveShards.add(shardRouting);
+                }
             }
         }
         this.allShards = allShards.build();
+        this.allActiveShards = allActiveShards.build();
     }
 
     public String index() {
@@ -195,7 +201,11 @@ public class IndexRoutingTable implements Iterable<IndexShardRoutingTable> {
      * An iterator over all shards (including replicas).
      */
     public ShardsIterator randomAllShardsIt() {
-        return new PlainShardsIterator(allShards, Math.abs(counter.incrementAndGet()));
+        return new PlainShardsIterator(allShards, counter.incrementAndGet());
+    }
+
+    public ShardsIterator randomAllActiveShardsIt() {
+        return new PlainShardsIterator(allActiveShards, counter.incrementAndGet());
     }
 
     /**

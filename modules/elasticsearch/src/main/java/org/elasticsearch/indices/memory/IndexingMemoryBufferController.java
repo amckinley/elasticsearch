@@ -28,6 +28,8 @@ import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.engine.Engine;
+import org.elasticsearch.index.engine.EngineClosedException;
+import org.elasticsearch.index.engine.FlushNotAllowedEngineException;
 import org.elasticsearch.index.service.IndexService;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.service.IndexShard;
@@ -124,9 +126,9 @@ public class IndexingMemoryBufferController extends AbstractLifecycleComponent<I
         @Override public void run() {
             synchronized (mutex) {
                 boolean activeInactiveStatusChanges = false;
-                long time = System.currentTimeMillis();
                 for (IndexService indexService : indicesService) {
                     for (IndexShard indexShard : indexService) {
+                        long time = threadPool.estimatedTimeInMillis();
                         Translog translog = ((InternalIndexShard) indexShard).translog();
                         ShardIndexingStatus status = shardsIndicesStatus.get(indexShard.shardId());
                         if (status == null) { // not added yet
@@ -139,19 +141,28 @@ public class IndexingMemoryBufferController extends AbstractLifecycleComponent<I
                             }
                             // inactive?
                             if (!status.inactive) {
-                                if ((time - status.time) > inactiveTime.millis()) {
+                                // mark it as inactive only if enough time has passed and there are no ongoing merges going on...
+                                if ((time - status.time) > inactiveTime.millis() && indexShard.mergeStats().current() == 0) {
+                                    try {
+                                        ((InternalIndexShard) indexShard).engine().updateIndexingBufferSize(Engine.INACTIVE_SHARD_INDEXING_BUFFER);
+                                    } catch (EngineClosedException e) {
+                                        // ignore
+                                        continue;
+                                    } catch (FlushNotAllowedEngineException e) {
+                                        // ignore
+                                        continue;
+                                    }
                                     // inactive for this amount of time, mark it
                                     status.inactive = true;
                                     activeInactiveStatusChanges = true;
-                                    logger.debug("marking shard [{}][{}] as inactive (inactive_time[{}]), setting size to [{}]", indexShard.shardId().index().name(), indexShard.shardId().id(), inactiveTime, Engine.INACTIVE_SHARD_INDEXING_BUFFER);
-                                    ((InternalIndexShard) indexShard).engine().updateIndexingBufferSize(Engine.INACTIVE_SHARD_INDEXING_BUFFER);
+                                    logger.debug("marking shard [{}][{}] as inactive (inactive_time[{}]) indexing wise, setting size to [{}]", indexShard.shardId().index().name(), indexShard.shardId().id(), inactiveTime, Engine.INACTIVE_SHARD_INDEXING_BUFFER);
                                 }
                             }
                         } else {
                             if (status.inactive) {
                                 status.inactive = false;
                                 activeInactiveStatusChanges = true;
-                                logger.debug("marking shard [{}][{}] as active", indexShard.shardId().index().name(), indexShard.shardId().id());
+                                logger.debug("marking shard [{}][{}] as active indexing wise", indexShard.shardId().index().name(), indexShard.shardId().id());
                             }
                             status.time = -1;
                         }
@@ -160,7 +171,7 @@ public class IndexingMemoryBufferController extends AbstractLifecycleComponent<I
                     }
                 }
                 if (activeInactiveStatusChanges) {
-                    calcAndSetShardIndexingBuffer("shards became active/inactive");
+                    calcAndSetShardIndexingBuffer("shards became active/inactive (indexing wise)");
                 }
             }
         }
@@ -204,7 +215,17 @@ public class IndexingMemoryBufferController extends AbstractLifecycleComponent<I
             for (IndexShard indexShard : indexService) {
                 ShardIndexingStatus status = shardsIndicesStatus.get(indexShard.shardId());
                 if (status == null || !status.inactive) {
-                    ((InternalIndexShard) indexShard).engine().updateIndexingBufferSize(shardIndexingBufferSize);
+                    try {
+                        ((InternalIndexShard) indexShard).engine().updateIndexingBufferSize(shardIndexingBufferSize);
+                    } catch (EngineClosedException e) {
+                        // ignore
+                        continue;
+                    } catch (FlushNotAllowedEngineException e) {
+                        // ignore
+                        continue;
+                    } catch (Exception e) {
+                        logger.warn("failed to set shard [{}][{}] index buffer to [{}]", indexShard.shardId().index().name(), indexShard.shardId().id(), shardIndexingBufferSize);
+                    }
                 }
             }
         }

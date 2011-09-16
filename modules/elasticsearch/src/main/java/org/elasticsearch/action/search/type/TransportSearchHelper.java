@@ -28,6 +28,7 @@ import org.elasticsearch.action.search.ShardSearchFailure;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.Base64;
 import org.elasticsearch.common.Nullable;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.Unicode;
 import org.elasticsearch.common.collect.ImmutableMap;
 import org.elasticsearch.common.collect.Maps;
@@ -39,19 +40,12 @@ import org.elasticsearch.search.internal.InternalSearchRequest;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 /**
  * @author kimchy (Shay Banon)
  */
 public abstract class TransportSearchHelper {
 
-
-    private final static Pattern scrollIdPattern;
-
-    static {
-        scrollIdPattern = Pattern.compile(";");
-    }
 
     /**
      * Builds the shard failures, and releases the cache (meaning this should only be called once!).
@@ -67,7 +61,7 @@ public abstract class TransportSearchHelper {
         return ret;
     }
 
-    public static InternalSearchRequest internalSearchRequest(ShardRouting shardRouting, int numberOfShards, SearchRequest request, String[] filteringAliases) {
+    public static InternalSearchRequest internalSearchRequest(ShardRouting shardRouting, int numberOfShards, SearchRequest request, String[] filteringAliases, long nowInMillis) {
         InternalSearchRequest internalRequest = new InternalSearchRequest(shardRouting, numberOfShards, request.searchType());
         internalRequest.source(request.source(), request.sourceOffset(), request.sourceLength());
         internalRequest.extraSource(request.extraSource(), request.extraSourceOffset(), request.extraSourceLength());
@@ -75,6 +69,7 @@ public abstract class TransportSearchHelper {
         internalRequest.timeout(request.timeout());
         internalRequest.filteringAliases(filteringAliases);
         internalRequest.types(request.types());
+        internalRequest.nowInMillis(nowInMillis);
         return internalRequest;
     }
 
@@ -119,7 +114,7 @@ public abstract class TransportSearchHelper {
         } catch (IOException e) {
             throw new ElasticSearchIllegalArgumentException("Failed to decode scrollId", e);
         }
-        String[] elements = scrollIdPattern.split(scrollId);
+        String[] elements = Strings.splitStringToArray(scrollId, ';');
         int index = 0;
         String type = elements[index++];
         int contextSize = Integer.parseInt(elements[index++]);

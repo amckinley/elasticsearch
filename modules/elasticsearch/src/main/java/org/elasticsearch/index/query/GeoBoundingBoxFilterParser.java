@@ -22,12 +22,15 @@ package org.elasticsearch.index.query;
 import org.apache.lucene.search.Filter;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.index.cache.filter.support.CacheKeyFilter;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.index.mapper.geo.GeoPointFieldDataType;
 import org.elasticsearch.index.mapper.geo.GeoPointFieldMapper;
-import org.elasticsearch.index.search.geo.GeoBoundingBoxFilter;
 import org.elasticsearch.index.search.geo.GeoHashUtils;
+import org.elasticsearch.index.search.geo.GeoUtils;
+import org.elasticsearch.index.search.geo.InMemoryGeoBoundingBoxFilter;
+import org.elasticsearch.index.search.geo.IndexedGeoBoundingBoxFilter;
+import org.elasticsearch.index.search.geo.Point;
 
 import java.io.IOException;
 
@@ -51,13 +54,19 @@ public class GeoBoundingBoxFilterParser implements FilterParser {
         XContentParser parser = parseContext.parser();
 
         boolean cache = false;
+        CacheKeyFilter.Key cacheKey = null;
         String fieldName = null;
-        GeoBoundingBoxFilter.Point topLeft = new GeoBoundingBoxFilter.Point();
-        GeoBoundingBoxFilter.Point bottomRight = new GeoBoundingBoxFilter.Point();
+        Point topLeft = new Point();
+        Point bottomRight = new Point();
 
         String filterName = null;
         String currentFieldName = null;
         XContentParser.Token token;
+        boolean normalizeLon = true;
+        boolean normalizeLat = true;
+
+        String type = "memory";
+
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
@@ -68,7 +77,7 @@ public class GeoBoundingBoxFilterParser implements FilterParser {
                     if (token == XContentParser.Token.FIELD_NAME) {
                         currentFieldName = parser.currentName();
                     } else if (token == XContentParser.Token.START_ARRAY) {
-                        GeoBoundingBoxFilter.Point point = null;
+                        Point point = null;
                         if ("top_left".equals(currentFieldName) || "topLeft".equals(currentFieldName)) {
                             point = topLeft;
                         } else if ("bottom_right".equals(currentFieldName) || "bottomRight".equals(currentFieldName)) {
@@ -85,7 +94,7 @@ public class GeoBoundingBoxFilterParser implements FilterParser {
                             }
                         }
                     } else if (token == XContentParser.Token.START_OBJECT) {
-                        GeoBoundingBoxFilter.Point point = null;
+                        Point point = null;
                         if ("top_left".equals(currentFieldName) || "topLeft".equals(currentFieldName)) {
                             point = topLeft;
                         } else if ("bottom_right".equals(currentFieldName) || "bottomRight".equals(currentFieldName)) {
@@ -113,7 +122,7 @@ public class GeoBoundingBoxFilterParser implements FilterParser {
                         if ("field".equals(currentFieldName)) {
                             fieldName = parser.text();
                         } else {
-                            GeoBoundingBoxFilter.Point point = null;
+                            Point point = null;
                             if ("top_left".equals(currentFieldName) || "topLeft".equals(currentFieldName)) {
                                 point = topLeft;
                             } else if ("bottom_right".equals(currentFieldName) || "bottomRight".equals(currentFieldName)) {
@@ -140,8 +149,24 @@ public class GeoBoundingBoxFilterParser implements FilterParser {
                     filterName = parser.text();
                 } else if ("_cache".equals(currentFieldName)) {
                     cache = parser.booleanValue();
+                } else if ("_cache_key".equals(currentFieldName) || "_cacheKey".equals(currentFieldName)) {
+                    cacheKey = new CacheKeyFilter.Key(parser.text());
+                } else if ("normalize".equals(currentFieldName)) {
+                    normalizeLat = parser.booleanValue();
+                    normalizeLon = parser.booleanValue();
+                } else if ("type".equals(currentFieldName)) {
+                    type = parser.text();
                 }
             }
+        }
+
+        if (normalizeLat) {
+            topLeft.lat = GeoUtils.normalizeLat(topLeft.lat);
+            bottomRight.lat = GeoUtils.normalizeLat(bottomRight.lat);
+        }
+        if (normalizeLon) {
+            topLeft.lon = GeoUtils.normalizeLon(topLeft.lon);
+            bottomRight.lon = GeoUtils.normalizeLon(bottomRight.lon);
         }
 
         MapperService mapperService = parseContext.mapperService();
@@ -150,15 +175,24 @@ public class GeoBoundingBoxFilterParser implements FilterParser {
         if (mapper == null) {
             throw new QueryParsingException(parseContext.index(), "failed to find geo_point field [" + fieldName + "]");
         }
-        if (mapper.fieldDataType() != GeoPointFieldDataType.TYPE) {
+        if (!(mapper instanceof GeoPointFieldMapper.GeoStringFieldMapper)) {
             throw new QueryParsingException(parseContext.index(), "field [" + fieldName + "] is not a geo_point field");
         }
+        GeoPointFieldMapper geoMapper = ((GeoPointFieldMapper.GeoStringFieldMapper) mapper).geoMapper();
+
         fieldName = mapper.names().indexName();
 
+        Filter filter;
+        if ("indexed".equals(type)) {
+            filter = IndexedGeoBoundingBoxFilter.create(topLeft, bottomRight, geoMapper);
+        } else if ("memory".equals(type)) {
+            filter = new InMemoryGeoBoundingBoxFilter(topLeft, bottomRight, fieldName, parseContext.indexCache().fieldData());
+        } else {
+            throw new QueryParsingException(parseContext.index(), "geo bounding box type [" + type + "] not supported, either 'indexed' or 'memory' are allowed");
+        }
 
-        Filter filter = new GeoBoundingBoxFilter(topLeft, bottomRight, fieldName, parseContext.indexCache().fieldData());
         if (cache) {
-            filter = parseContext.cacheFilter(filter);
+            filter = parseContext.cacheFilter(filter, cacheKey);
         }
         filter = wrapSmartNameFilter(filter, parseContext.smartFieldMappers(fieldName), parseContext);
         if (filterName != null) {
